@@ -183,6 +183,8 @@ config = get_config()
 # All secrets loaded from .env, never hardcoded
 ```
 
+**Testing tip:** For list fields like `allowed_telegram_ids`, set env values as JSON arrays in tests (e.g., `ALLOWED_TELEGRAM_IDS="[123,456]"`). This prevents `SettingsError` parsing failures.
+
 ### Config Model Template
 ```python
 from pydantic import Field

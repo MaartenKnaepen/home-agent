@@ -26,14 +26,10 @@
 
 ## `config.py` — Configuration
 
-_Not yet implemented._
-
-<!-- Template for entries:
 | Function/Class | Signature | Returns | Description |
 |----------------|-----------|---------|-------------|
-| `AppConfig` | `class(BaseSettings)` | — | App config model with all env vars |
-| `get_config` | `() -> AppConfig` | `AppConfig` | Singleton config accessor |
--->
+| `AppConfig` | `class(BaseSettings)` | — | App config model with env vars and defaults |
+| `get_config` | `() -> AppConfig` | `AppConfig` | Cached config accessor |
 
 ---
 
@@ -179,17 +175,10 @@ _Not yet implemented._
 
 ## 🧪 Test Helpers (`tests/conftest.py`)
 
-_Not yet implemented._
-
-<!-- Template for entries:
 | Function/Class | Signature | Returns | Description |
 |----------------|-----------|---------|-------------|
+| `mock_env` | `fixture -> dict[str, str]` | `dict` | Patches required env vars for tests |
 | `mock_config` | `fixture -> AppConfig` | `AppConfig` | Config with test values |
-| `mock_deps` | `fixture -> AgentDeps` | `AgentDeps` | Full mock dependencies for agent tests |
-| `test_db` | `fixture async (tmp_path) -> Path` | `Path` | Temporary initialized SQLite DB |
-| `make_test_update` | `(text: str, user_id: int) -> Update` | `Update` | Mock Telegram Update object |
-| `default_test_profile` | `() -> UserProfile` | `UserProfile` | UserProfile with test defaults |
--->
 
 ---
 
