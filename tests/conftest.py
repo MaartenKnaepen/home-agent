@@ -1,9 +1,12 @@
 import os
 from unittest.mock import patch
 
+from pathlib import Path
+
 import pytest
 
 from home_agent.config import AppConfig
+from home_agent.db import init_db
 
 
 @pytest.fixture
@@ -32,3 +35,11 @@ def mock_config() -> AppConfig:
         db_path="data/test.db",
         log_level="INFO",
     )
+
+
+@pytest.fixture
+async def test_db(tmp_path: Path) -> Path:
+    """Create a temporary SQLite database for tests."""
+    db_path = tmp_path / "test.db"
+    await init_db(db_path)
+    return db_path

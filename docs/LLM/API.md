@@ -35,17 +35,13 @@
 
 ## `db.py` — Database Layer
 
-_Not yet implemented._
-
-<!-- Template for entries:
 | Function/Class | Signature | Returns | Description |
 |----------------|-----------|---------|-------------|
-| `init_db` | `async (db_path: str) -> None` | `None` | Creates tables if not exist |
-| `save_message` | `async (db_path: str, user_id: int, role: str, content: str) -> None` | `None` | Persist a conversation message |
-| `get_history` | `async (db_path: str, user_id: int, limit: int | None) -> list[dict]` | `list[dict]` | Retrieve messages for a user |
-| `save_profile` | `async (db_path: str, user_id: int, profile_json: str) -> None` | `None` | Persist user profile blob |
-| `get_profile` | `async (db_path: str, user_id: int) -> str | None` | `str | None` | Retrieve user profile JSON |
--->
+| `init_db` | `async (db_path: str | Path) -> None` | `None` | Create message/profile tables when missing |
+| `save_message` | `async (db_path: str | Path, *, user_id: int, role: str, content: str) -> None` | `None` | Persist a conversation message |
+| `get_history` | `async (db_path: str | Path, *, user_id: int, limit: int | None = None) -> list[dict[str, str]]` | `list[dict[str, str]]` | Retrieve message history ordered oldest to newest |
+| `save_profile` | `async (db_path: str | Path, *, user_id: int, data: dict[str, Any]) -> None` | `None` | Persist a user profile payload as JSON |
+| `get_profile` | `async (db_path: str | Path, *, user_id: int) -> dict[str, Any] | None` | `dict[str, Any] | None` | Retrieve stored profile payload |
 
 ---
 
