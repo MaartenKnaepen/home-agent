@@ -4,18 +4,21 @@
 # Updated after each completed step by autodev.
 
 project: home-agent
-last_updated: "2026-02-13"
+last_updated: "2026-02-22"
 
 current_state:
   phase: 1
-  step: "1.3"
-  description: "Phase 1 — Steps 1.1 (scaffolding), 1.2 (database layer), and 1.3 (user profile model) complete"
+  step: "1.5"
+  description: "Phase 1 — Steps 1.1 (scaffolding), 1.2 (database layer), 1.3 (user profile model), 1.4 (conversation history & processor), and 1.5 (Telegram bot skeleton) complete"
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
     - "Message save/retrieve and profile save/retrieve functions"
     - "Pydantic user profile models (UserProfile, MediaPreferences, NotificationPrefs)"
     - "ProfileManager with async get/save and automatic default profile creation"
+    - "HistoryManager wrapping db.py for conversation history CRUD"
+    - "sliding_window_processor for PydanticAI history_processors (last N pairs)"
+    - "Telegram bot with whitelist enforcement and typing indicator"
   known_issues: []
 
 completed_steps:
@@ -46,6 +49,38 @@ completed_steps:
       - "ProfileManager uses model_copy() for immutable profile updates rather than in-place mutation"
       - "Default profile template pattern allows customization via constructor injection"
       - "user_id stored as DB key, not in the serialized data blob"
+    issues: []
+
+  - step: "1.5"
+    name: "Telegram Bot Skeleton"
+    date: "2026-02-13"
+    summary: "bot.py with make_message_handler() closure, whitelist enforcement, ChatAction.TYPING indicator, stub echo reply. create_application() factory and run_bot() entry point. Import linter contract 'bot does not import main' activated."
+    decisions:
+      - "Used make_message_handler(config) closure pattern so handler captures config without global state"
+      - "ChatAction lives in telegram.constants (not telegram) in python-telegram-bot v21+"
+      - "create_application() returns Application without starting polling so callers control lifecycle"
+    issues: []
+
+  - step: "1.4"
+    name: "Conversation History & Processor"
+    date: "2026-02-13"
+    summary: "HistoryManager wrapping db.py for conversation history CRUD; sliding_window_processor closure for PydanticAI history_processors keeping last N request/response pairs."
+    decisions:
+      - "HistoryManager delegates entirely to db.save_message/get_history — no duplication"
+      - "sliding_window_processor is a closure returning a processor function for configurability"
+      - "Unpaired trailing ModelRequest at window boundary is excluded to avoid splitting pairs"
+      - "TextPart uses 'content' kwarg (not 'text') in installed pydantic-ai version"
+    deferred:
+      - id: "DEFER-1.4-001"
+        title: "User profile injection into history context"
+        original_task: "Step 1.4 Task 4 — Integrate user profile into system prompt context"
+        reason: >
+          Per architecture guidelines (AGENTS.md), profile injection belongs in agent.py
+          via a dynamic @agent.system_prompt, not in history.py. Placing it in history.py
+          would couple the history layer to the profile layer, violating the separation of
+          concerns defined in the architecture. This is deferred to Step 1.6 (Agent definition)
+          where agent.py will use @agent.system_prompt(dynamic=True) to inject UserProfile data.
+        target_step: "1.6"
     issues: []
 
 architecture_decisions:

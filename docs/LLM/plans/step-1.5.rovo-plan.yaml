@@ -1,0 +1,157 @@
+step: "1.5"
+name: "Telegram Bot Skeleton"
+phase: 1
+goal: "Bot connects to Telegram, receives messages, enforces user whitelist."
+
+context:
+  description: "Implement a basic Telegram bot using python-telegram-bot that connects to Telegram, receives messages, enforces user whitelist from configuration, rejects unauthorized users, and shows typing indicators during processing."
+  dependencies:
+    - "src/home_agent/config.py"
+    - "python-telegram-bot library"
+    - "ALLOWED_TELEGRAM_IDS from config"
+  references:
+    - "https://docs.python-telegram-bot.org/en/stable/"
+    - "src/home_agent/bot.py will be created"
+
+tasks:
+  - id: 1
+    title: "Install python-telegram-bot dependency"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Add python-telegram-bot to the project dependencies in pyproject.toml.
+    tests:
+      - "Dependency is correctly added to pyproject.toml"
+
+  - id: 2
+    title: "Create basic bot.py structure"
+    file: "src/home_agent/bot.py"
+    action: "create"
+    description: |
+      Create the basic structure for the telegram bot implementation file.
+      This should include necessary imports.
+    code_snippet: |
+      """Telegram bot implementation for Home Agent."""
+      from __future__ import annotations
+      
+      import logging
+      from pathlib import Path
+      
+      from telegram.ext import Application, MessageHandler, filters
+      from telegram import Bot, Update
+      
+      from home_agent.config import get_config
+      
+      logger = logging.getLogger(__name__)
+    tests:
+      - "File is created with proper imports"
+
+  - id: 3
+    title: "Create TelegramBot class"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      Implement a TelegramBot class that initializes with an Application and handles
+      telegram bot operations. This should include the application setup with polling.
+    code_snippet: |
+      class TelegramBot:
+          def __init__(self, db_path: str | Path) -> None:
+              """Initialize the Telegram bot with configuration and database path."""
+              self.config = get_config()
+              self.db_path = Path(db_path)
+              
+              # Initialize the application
+              self.application = Application.builder().token(self.config.TELEGRAM_BOT_TOKEN).build()
+              
+          async def start_polling(self) -> None:
+              """Start the bot in polling mode."""
+              # Add the message handler
+              message_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message)
+              self.application.add_handler(message_handler)
+              
+              # Start polling
+              await self.application.run_polling()
+    tests:
+      - "Class is properly initialized"
+      - "start_polling method exists and sets up message handler"
+
+  - id: 4
+    title: "Implement message handler with whitelist check"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      Create a handle_message method that receives text messages and enforces
+      the user whitelist from ALLOWED_TELEGRAM_IDS configuration. Non-whitelisted
+      users should receive a rejection message.
+    code_snippet: |
+      async def handle_message(self, update: Update, context) -> None:
+          """Handle incoming text messages, enforcing user whitelist."""
+          user_id = update.effective_user.id
+          
+          # Check if user is whitelisted
+          if user_id not in self.config.ALLOWED_TELEGRAM_IDS:
+              # Send rejection message
+              await update.message.reply_text("Unauthorized access. Contact the administrator.")
+              return
+              
+          # Process authorized user's message
+          message_text = update.message.text
+          
+          # Show typing indicator while processing
+          await context.bot.send_chat_action(chat_id=update.effective_message.id, action="typing")
+          
+          # Call the message handler function (to be implemented later)
+          response = await self.process_message(user_id, message_text)
+          
+          # Send response back to user
+          await update.message.reply_text(response)
+    tests:
+      - "Message handler checks user whitelist"
+      - "Non-whitelisted users get rejection message"
+      - "Whitelisted users' messages are processed"
+
+  - id: 5
+    title: "Implement typing indicator"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      Ensure that the bot sends a typing indicator while processing messages.
+      This was mentioned in the scope of the step.
+    tests:
+      - "Typing indicator is shown during message processing"
+
+  - id: 6
+    title: "Create a placeholder for message processing"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      Create a placeholder process_message method that will be replaced later
+      when the agent is implemented. For now it can return a placeholder response.
+    code_snippet: |
+      async def process_message(self, user_id: int, message: str) -> str:
+          """Placeholder for message processing - will be replaced with agent call."""
+          return f"Received: {message}"
+    tests:
+      - "process_message method exists as placeholder"
+
+  - id: 7
+    title: "Add main function to start the bot"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      Add a main function that initializes and starts the bot, which can be
+      called from the main.py file later.
+    code_snippet: |
+      async def main(db_path: str | Path) -> None:
+          """Main entry point to start the Telegram bot."""
+          bot = TelegramBot(db_path)
+          await bot.start_polling()
+    tests:
+      - "Main function exists to start the bot"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Whitelisted user's message is forwarded to handler"
+  - "Non-whitelisted user gets rejection"
+  - "Bot sends typing action before responding"

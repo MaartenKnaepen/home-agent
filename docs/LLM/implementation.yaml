@@ -106,7 +106,7 @@ phases:
       - Typing indicator while processing
 
       '
-    status: pending
+    status: done
     test: '- test_bot.py — Whitelisted user''s message is forwarded to handler
 
       - Non-whitelisted user gets rejection

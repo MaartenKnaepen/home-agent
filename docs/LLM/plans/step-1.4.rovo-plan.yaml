@@ -1,0 +1,90 @@
+step: "1.4"
+name: "Conversation History & Processor"
+phase: 1
+goal: "Store full history in SQLite, send only a sliding window to the LLM."
+
+context:
+  description: "Implement HistoryManager for database-backed conversation storage and sliding_window_processor for PydanticAI integration. This enables full history persistence while controlling token usage by sending only the last N message pairs to the LLM."
+  dependencies:
+    - "src/home_agent/db.py"
+    - "pydantic_ai.messages"
+  references:
+    - "src/home_agent/history.py"
+    - "tests/test_history.py"
+
+tasks:
+  - id: 1
+    title: "Create HistoryManager class"
+    file: "src/home_agent/history.py"
+    action: "create"
+    description: |
+      Create HistoryManager class that wraps db.py functions for message CRUD operations.
+      The class should have async save_message() and get_history() methods compatible
+      with the database layer, with proper logging.
+    code_snippet: |
+      class HistoryManager:
+          def __init__(self, db_path: str | Path) -> None:
+              self.db_path = Path(db_path)
+          
+          async def save_message(self, *, user_id: int, role: str, content: str) -> None:
+              # Save message using db.save_message
+              pass
+          
+          async def get_history(
+              self, *, user_id: int, limit: int | None = None
+          ) -> list[dict[str, str]]:
+              # Get history using db.get_history
+              pass
+    tests:
+      - "Test HistoryManager.save_message() stores messages in DB"
+      - "Test HistoryManager.get_history() retrieves messages from DB"
+      - "Test HistoryManager preserves full history without truncation"
+      - "Test HistoryManager isolates messages per user_id"
+
+  - id: 2
+    title: "Implement sliding_window_processor"
+    file: "src/home_agent/history.py"
+    action: "create"
+    description: |
+      Create sliding_window_processor function that returns a PydanticAI-compatible
+      processor. The processor should keep only the last N complete message pairs,
+      ensuring that request/response pairs are never split across the window boundary.
+    code_snippet: |
+      def sliding_window_processor(
+          *, n: int
+      ) -> Callable[[list[ModelMessage]], list[ModelMessage]]:
+          def processor(messages: list[ModelMessage]) -> list[ModelMessage]:
+              # Implementation to keep only last N message pairs
+              pass
+          return processor
+    tests:
+      - "Test sliding window returns last N pairs from long history"
+      - "Test sliding window doesn't split request-response pairs"
+      - "Test sliding window handles edge cases (empty, less than N)"
+
+  - id: 3
+    title: "Add import for PydanticAI compatibility"
+    file: "src/home_agent/history.py"
+    action: "modify"
+    description: |
+      Add all necessary imports including pydantic_ai.messages types needed for
+      the sliding_window_processor function, and proper typing imports.
+    tests:
+      - "Verify all necessary imports are present"
+
+  - id: 4
+    title: "Integrate user profile into system prompt context"
+    file: "src/home_agent/history.py"
+    action: "modify"
+    description: |
+      Add functionality to inject user profile information into the system prompt context
+      when building history for the LLM.
+    tests:
+      - "Test that user profile information is properly included in history context"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Full history preserved in DB"
+  - "Sliding window with N=5 returns only last 5 message pairs from a 20-message history"
+  - "Tool-call/tool-result pairs are not split across the window boundary"

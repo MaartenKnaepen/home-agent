@@ -1,334 +1,128 @@
 step: "1.3"
 name: "User Profile Model"
-revision: null
+phase: 1
 goal: "Pydantic models for user profile with serialization to/from SQLite."
 
-prerequisites:
-  - "Read docs/LLM/AGENTS.md for project coding standards"
-  - "Read docs/LLM/api.yaml to check for reusable existing functions"
-  - "Review existing similar modules for consistency"
-
 context:
-  description: "Current project state includes SQLite database layer with save_profile() and get_profile() functions in db.py. Need to implement Pydantic models for user profiles and a ProfileManager to interact with the database."
+  description: "Creating Pydantic models for user profiles that can be serialized to and from SQLite. This includes UserProfile, MediaPreferences, NotificationPrefs models and a ProfileManager class that interfaces with the database layer."
   dependencies:
-    - "Step 1.1: Project Scaffolding (complete)"
-    - "Step 1.2: SQLite Database Layer (complete)"
-  existing_code:
-    - path: "src/home_agent/db.py"
-      relevant: "save_profile() and get_profile() functions for database interaction"
-
-memory_update:
-  summary: "Implemented Pydantic models for user profiles (UserProfile, MediaPreferences, NotificationPrefs) and ProfileManager class for database persistence."
-
-api_update:
-  - module: "src/home_agent/profile.py"
-    name: "MediaPreferences"
-    type: "class"
-    signature: "BaseModel"
-    description: "Genre, quality, language preferences for media consumption"
-  - module: "src/home_agent/profile.py"
-    name: "NotificationPrefs"
-    type: "class"
-    signature: "BaseModel"
-    description: "Notification settings including quiet hours and preferences"
-  - module: "src/home_agent/profile.py"
-    name: "UserProfile"
-    type: "class"
-    signature: "BaseModel"
-    description: "Complete user profile with preferences, notes, statistics and personal details"
-  - module: "src/home_agent/profile.py"
-    name: "ProfileManager"
-    type: "class"
-    signature: "__init__(db_path: str | Path, *, default_profile: UserProfile | None = None)"
-    description: "CRUD operations for user profiles with default profile creation"
-  - module: "src/home_agent/profile.py"
-    name: "ProfileManager.get"
-    type: "method"
-    signature: "async (user_id: int) -> UserProfile"
-    description: "Get user profile from DB or create a default one"
-  - module: "src/home_agent/profile.py"
-    name: "ProfileManager.save"
-    type: "method"
-    signature: "async (profile: UserProfile) -> None"
-    description: "Persist profile to DB"
+    - "src/home_agent/db.py"  # Database layer for reading/writing profiles
+  references:
+    - "src/home_agent/db.py"  # To understand how to save/load profile data
+    - "docs/LLM/api.yaml"     # To check existing interfaces
+    - "docs/LLM/AGENTS.md"    # For coding conventions
 
 tasks:
   - id: 1
-    description: "Create MediaPreferences Pydantic model"
+    title: "Create basic Pydantic models"
     file: "src/home_agent/profile.py"
     action: "create"
-    agents_md_rules:
-      - "Use Pydantic BaseModel for structured data"
-      - "Use Google-style docstrings with Args/Returns/Raises"
-      - "Include type hints everywhere"
-    details: |
-      Create the MediaPreferences Pydantic model for storing media consumption preferences:
-      
-      ```python
-      from pydantic import BaseModel
-      
-      class MediaPreferences(BaseModel):
-          """User's media consumption preferences.
-          
-          Attributes:
-              preferred_genres: List of genres the user likes to watch.
-              preferred_quality: Default quality for media requests (e.g., '1080p', '4k').
-              preferred_language: Preferred audio/subtitle language (e.g., 'en', 'fr').
-              avoid_genres: List of genres the user dislikes.
-          """
-          
-          preferred_genres: list[str] = []
-          preferred_quality: str = "1080p"
-          preferred_language: str = "en"
-          avoid_genres: list[str] = []
-      ```
-
-  - id: 2
-    description: "Create NotificationPrefs Pydantic model"
-    file: "src/home_agent/profile.py"
-    action: "create"
-    agents_md_rules:
-      - "Use Pydantic BaseModel for structured data"
-      - "Use Google-style docstrings with Args/Returns/Raises"
-      - "Include type hints everywhere"
-    details: |
-      Create the NotificationPrefs Pydantic model for storing notification settings:
-      
-      ```python
+    description: |
+      Define the Pydantic models for user profiles: MediaPreferences, NotificationPrefs, and UserProfile.
+      These models will store user preferences and settings for the home agent.
+    code_snippet: |
       from pydantic import BaseModel
       from datetime import time
+      from typing import Any, Dict, List, Optional
+      
+      class MediaPreferences(BaseModel):
+          """User's media consumption preferences."""
+          
+          preferred_genres: List[str] = []
+          preferred_quality: str = "1080p"
+          preferred_language: str = "en"
+          avoid_genres: List[str] = []
       
       class NotificationPrefs(BaseModel):
-          """User's notification preferences.
-          
-          Attributes:
-              enabled: Whether notifications are enabled for this user.
-              quiet_hours_start: Time when notifications should be muted.
-              quiet_hours_end: Time when notifications should resume.
-              notifications_by_source: Dict mapping notification sources to enabled status.
-          """
+          """User's notification preferences."""
           
           enabled: bool = True
-          quiet_hours_start: time | None = None
-          quiet_hours_end: time | None = None
-          notifications_by_source: dict[str, bool] = {"media_requests": True, "system_alerts": True}
-      ```
-
-  - id: 3
-    description: "Create UserProfile Pydantic model"
-    file: "src/home_agent/profile.py"
-    action: "create"
-    agents_md_rules:
-      - "Use Pydantic BaseModel for structured data"
-      - "Use Google-style docstrings with Args/Returns/Raises"
-      - "Include type hints everywhere"
-    details: |
-      Create the UserProfile Pydantic model combining all profile data:
-      
-      ```python
-      from pydantic import BaseModel
-      from datetime import datetime
-      from typing import Optional
+          quiet_hours_start: Optional[time] = None
+          quiet_hours_end: Optional[time] = None
+          media_requests: bool = True
+          system_alerts: bool = True
       
       class UserProfile(BaseModel):
-          """Complete user profile with preferences, notes, and statistics.
-          
-          Attributes:
-              user_id: Telegram user ID.
-              name: Display name for the user.
-              created_at: When the profile was first created.
-              updated_at: When the profile was last updated.
-              media_preferences: Media consumption preferences.
-              notification_prefs: Notification settings.
-              notes: Personal notes or observations about the user.
-              stats: Usage statistics.
-          """
+          """Complete user profile with preferences and settings."""
           
           user_id: int
           name: Optional[str] = None
-          created_at: datetime
-          updated_at: datetime
           media_preferences: MediaPreferences = MediaPreferences()
-          notification_prefs: NotificationPrefs = NotificationPrefs()
-          notes: list[str] = []
-          stats: dict[str, int] = {"requests_made": 0, "downloads_completed": 0}
-      ```
-
-  - id: 4
-    description: "Create ProfileManager class"
-    file: "src/home_agent/profile.py"
-    action: "create"
-    agents_md_rules:
-      - "Follow async-first pattern for I/O operations"
-      - "Use Google-style docstrings with Args/Returns/Raises"
-      - "Include type hints everywhere"
-      - "Log with logging.getLogger(__name__), not print()"
-      - "Handle exceptions with chaining"
-      - "Use pathlib.Path for path handling"
-    details: |
-      Create the ProfileManager class to handle database operations:
-      
-      ```python
-      import logging
-      from datetime import datetime
-      from pathlib import Path
-      from typing import Any
-      
-      from home_agent.db import get_profile, save_profile
-      
-      logger = logging.getLogger(__name__)
-      
-      class ProfileManager:
-          """Manages user profiles with database persistence.
-          
-          Provides methods to get and save user profiles to the SQLite database,
-          with automatic creation of default profiles for new users.
-          
-          Attributes:
-              db_path: Path to the SQLite database file.
-              default_profile: Template for creating default profiles when needed.
-          """
-          
-          def __init__(self, db_path: str | Path, *, default_profile: UserProfile | None = None):
-              """Initialize the ProfileManager with database path and default profile.
-              
-              Args:
-                  db_path: Path to the SQLite database file.
-                  default_profile: Optional template for creating default profiles.
-              """
-              self.db_path = Path(db_path)
-              self.default_profile = default_profile or self._create_default_profile()
-              
-          def _create_default_profile(self) -> UserProfile:
-              """Create a default UserProfile instance.
-              
-              Returns:
-                  A new UserProfile with default settings.
-              """
-              now = datetime.now()
-              return UserProfile(
-                  user_id=0,  # Placeholder ID that will be replaced
-                  name=None,
-                  created_at=now,
-                  updated_at=now,
-                  media_preferences=MediaPreferences(),
-                  notification_prefs=NotificationPrefs(),
-                  notes=[],
-                  stats={"requests_made": 0, "downloads_completed": 0}
-              )
-              
-          async def get(self, user_id: int) -> UserProfile:
-              """Get or create user profile from the database.
-              
-              Args:
-                  user_id: Telegram user ID to retrieve profile for.
-                  
-              Returns:
-                  User profile from database or newly created default profile.
-              """
-              profile_data = await get_profile(self.db_path, user_id=user_id)
-              if profile_data:
-                  # Convert the dictionary to a UserProfile instance
-                  # Since the stored data is in dict form, we need to reconstruct the objects
-                  profile_dict = {**profile_data}
-                  profile_dict['user_id'] = user_id
-                  
-                  # Create instances of nested models if they exist in the data
-                  if 'media_preferences' in profile_dict:
-                      profile_dict['media_preferences'] = MediaPreferences(**profile_dict['media_preferences'])
-                  else:
-                      profile_dict['media_preferences'] = MediaPreferences()
-                      
-                  if 'notification_prefs' in profile_dict:
-                      profile_dict['notification_prefs'] = NotificationPrefs(**profile_dict['notification_prefs'])
-                  else:
-                      profile_dict['notification_prefs'] = NotificationPrefs()
-                  
-                  # Set user_id to match the parameter
-                  profile_dict['user_id'] = user_id
-                  
-                  # Preserve the original datetimes or set them if not present
-                  if 'created_at' not in profile_dict:
-                      profile_dict['created_at'] = datetime.now()
-                  if 'updated_at' not in profile_dict:
-                      profile_dict['updated_at'] = datetime.now()
-                  
-                  return UserProfile(**profile_dict)
-              else:
-                  # Create default profile for new user
-                  logger.info(f"Creating default profile for user {user_id}")
-                  new_profile = self._create_default_profile()
-                  new_profile.user_id = user_id
-                  await self.save(new_profile)
-                  return new_profile
-                  
-          async def save(self, profile: UserProfile) -> None:
-              """Save profile to database.
-              
-              Args:
-                  profile: User profile to save to database.
-              """
-              profile.updated_at = datetime.now()
-              profile_data = profile.model_dump()
-              # Remove user_id from the data because it's a path parameter to db function
-              profile_data.pop('user_id', None)
-              
-              await save_profile(self.db_path, user_id=profile.user_id, data=profile_data)
-              logger.info(f"Saved profile for user {profile.user_id}")
-      ```
-
-  - id: 5
-    description: "Add imports and basic structure to profile.py"
+          notification_preferences: NotificationPrefs = NotificationPrefs()
+          notes: List[str] = []
+          created_at: Optional[str] = None
+          updated_at: Optional[str] = None
+    tests:
+      - "Create test to verify default profile has sensible defaults"
+      - "Create test to verify profile serializes to JSON and deserializes back identically"
+  
+  - id: 2
+    title: "Create ProfileManager class"
     file: "src/home_agent/profile.py"
     action: "modify"
-    agents_md_rules:
-      - "Import in the correct order: stdlib, third-party, local"
-      - "Use absolute imports only"
-    details: |
-      Add the required imports and ensure the file has proper structure:
-      
-      ```python
-      """User profile models and persistence layer.
-      
-      Defines Pydantic models for user profiles and a ProfileManager class
-      to handle database interactions via db.py.
-      """
-      
-      import logging
-      from datetime import datetime, time
+    description: |
+      Implement a ProfileManager class that handles reading/writing profiles to the SQLite database.
+      This class should handle creating default profiles for new users.
+    code_snippet: |
+      import json
       from pathlib import Path
-      from typing import Optional
-      
-      from pydantic import BaseModel
+      from typing import Any, Dict, Optional
       
       from home_agent.db import get_profile, save_profile
       
-      logger = logging.getLogger(__name__)
       
-      # [Include all the classes defined in previous tasks]
-      ```
-
-tests:
-  - file: "tests/test_profile.py"
-    description: "Test the user profile model functionality"
-    cases:
-      - name: "test_default_profile_has_sensible_defaults"
-        description: "Newly created default profile has expected default values"
-        assertions: "assert profile.media_preferences.preferred_quality == '1080p' and len(profile.notes) == 0"
-      - name: "test_profile_serializes_deserializes_identically"
-        description: "A profile serializes to JSON and deserializes back identically"
-        assertions: "assert original_profile.model_dump() == reloaded_profile.model_dump()"
-      - name: "test_profile_manager_creates_default_for_unknown_user"
-        description: "ProfileManager creates and saves a default profile for a user that doesn't exist"
-        assertions: "assert profile is not None and profile.user_id == new_user_id"
-      - name: "test_profile_manager_updates_and_persists_fields"
-        description: "ProfileManager properly updates and persists profile field changes"
-        assertions: "assert saved_profile.media_preferences.preferred_quality == '4k'"
-    mocking:
-      - "Use tmp_path for database tests"
-      - "Patch at import location, not definition"
+      class ProfileManager:
+          """Manages user profiles with async CRUD operations via db.py."""
+          
+          def __init__(self, db_path: str | Path, *, default_profile: Optional['UserProfile'] = None):
+              self.db_path = db_path
+              self.default_profile_template = default_profile or UserProfile(
+                  user_id=0,  # Will be replaced with actual user_id
+                  name="New User",
+                  notes=["Default profile created"]
+              )
+          
+          async def get(self, user_id: int) -> 'UserProfile':
+              """Get user profile from DB, or create and persist a default one if not found."""
+              profile_data = await get_profile(self.db_path, user_id=user_id)
+              
+              if profile_data is None:
+                  # Create a default profile for new user
+                  default_profile = self.default_profile_template.model_copy()
+                  default_profile.user_id = user_id
+                  await self.save(default_profile)
+                  return default_profile
+                  
+              # Deserialize the profile data from JSON
+              profile_data['user_id'] = user_id
+              return UserProfile(**profile_data)
+          
+          async def save(self, profile: 'UserProfile') -> None:
+              """Persist a user profile to the database, updating the updated_at timestamp."""
+              from datetime import datetime
+              
+              profile.updated_at = datetime.now().isoformat()
+              data = profile.model_dump(mode='json')
+              # Remove user_id from data since it's used as the key in the database
+              data.pop('user_id', None)
+              
+              await save_profile(self.db_path, user_id=profile.user_id, data=data)
+    tests:
+      - "Create test to verify ProfileManager creates default profile for unknown user"
+      - "Create test to verify ProfileManager updates and persists profile fields"
+  
+  - id: 3
+    title: "Add import linter contract"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Uncomment or add the import linter contract for the profile module to ensure proper architectural boundaries.
+    tests:
+      - "Verify import linter passes with the new contract in place"
 
 verification:
-  - "uv run pytest tests/test_profile.py passes"
-  - "uv run pyright src/home_agent/profile.py has no errors"
-  - "All imports resolve correctly"
+  - "All tasks completed successfully"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "ProfileManager correctly creates default profiles for new users"
+  - "Profile serialization/deserialization works correctly"
+  - "Tests pass for all profile-related functionality"

@@ -9,6 +9,8 @@ dependencies = [
     "pytest>=9.0.2",
     "aiosqlite",
     "pytest-asyncio",
+    "pydantic-ai>=1.62.0",
+    "python-telegram-bot>=21.6",
 ]
 
 [tool.pytest.ini_options]
@@ -59,6 +61,18 @@ forbidden_modules = [
     "home_agent.mcp",
 ]
 
+# Layer 1b — history: only imports config, db, and shared
+[[tool.importlinter.contracts]]
+name = "history only imports config and db"
+type = "forbidden"
+source_modules = ["home_agent.history"]
+forbidden_modules = [
+    "home_agent.agent",
+    "home_agent.bot",
+    "home_agent.tools",
+    "home_agent.mcp",
+]
+
 # Layer 2 — tools and mcp: no imports from agent, bot, main
 # Uncomment when home_agent.tools and home_agent.mcp exist
 # [[tool.importlinter.contracts]]
@@ -82,9 +96,9 @@ forbidden_modules = [
 #     "home_agent.main",
 # ]
 
-# [[tool.importlinter.contracts]]
-# name = "bot does not import main"
-# type = "forbidden"
-# source_modules = ["home_agent.bot"]
-# forbidden_modules = ["home_agent.main"]
+[[tool.importlinter.contracts]]
+name = "bot does not import main"
+type = "forbidden"
+source_modules = ["home_agent.bot"]
+forbidden_modules = ["home_agent.main"]
 

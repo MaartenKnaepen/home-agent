@@ -45,6 +45,29 @@ modules:
         signature: "async (db_path: str | Path, *, user_id: int) -> dict[str, Any] | None"
         description: "Retrieve a stored user profile payload, or None if missing."
 
+  # ── src/home_agent/history.py ───────────────────────────────────────────────
+  - module: "src/home_agent/history.py"
+    exports:
+      - name: "HistoryManager"
+        type: "class"
+        signature: "__init__(db_path: str | Path)"
+        description: "Wraps db.py for conversation history CRUD. save_message() and get_history() delegate to db layer."
+
+      - name: "HistoryManager.save_message"
+        type: "method"
+        signature: "async (*, user_id: int, role: str, content: str) -> None"
+        description: "Save a message to conversation history in SQLite."
+
+      - name: "HistoryManager.get_history"
+        type: "method"
+        signature: "async (*, user_id: int, limit: int | None = None) -> list[dict[str, str]]"
+        description: "Fetch conversation history for a user, oldest first."
+
+      - name: "sliding_window_processor"
+        type: "function"
+        signature: "(*, n: int) -> Callable[[list[ModelMessage]], list[ModelMessage]]"
+        description: "Returns a PydanticAI history_processors-compatible callable that keeps only the last N message pairs."
+
   # ── src/home_agent/profile.py ───────────────────────────────────────────────
   - module: "src/home_agent/profile.py"
     exports:
@@ -77,3 +100,21 @@ modules:
         type: "method"
         signature: "async (profile: UserProfile) -> None"
         description: "Persist a user profile to the database, updating the updated_at timestamp."
+
+  # ── src/home_agent/bot.py ──────────────────────────────────────────────────
+  - module: "src/home_agent/bot.py"
+    exports:
+      - name: "make_message_handler"
+        type: "function"
+        signature: "(config: AppConfig) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]"
+        description: "Create a Telegram message handler closure that captures app config. Enforces whitelist, sends typing indicator, replies with stub."
+
+      - name: "create_application"
+        type: "function"
+        signature: "(config: AppConfig) -> Application"
+        description: "Build and return a configured Telegram Application with message handler wired. Does NOT start polling."
+
+      - name: "run_bot"
+        type: "function"
+        signature: "(config: AppConfig) -> None"
+        description: "Build the Telegram application and start polling for updates. Blocks until stopped."
