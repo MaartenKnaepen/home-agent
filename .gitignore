@@ -206,3 +206,13 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .rovo-plan.md
+.rovodev/subagents/implementer.md
+.rovodev/subagents/reviewer.md
+docs/LLM/backup/API.md
+docs/LLM/backup/ARCHITECT.md
+docs/LLM/backup/IMPLEMENTATION.md
+docs/LLM/backup/MEMORY.md
+docs/LLM/configs/rovodev-opus.yml
+docs/LLM/configs/rovodev-opus.yml.lock
+docs/LLM/configs/rovodev-sonnet.yml
+docs/LLM/configs/rovodev-sonnet.yml.lock

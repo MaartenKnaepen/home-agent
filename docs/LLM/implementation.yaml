@@ -1,0 +1,557 @@
+description: Home server Telegram agent using PydanticAI + MCP for natural language
+  control of home services
+phases:
+- focus: A working bot that can search and request media via natural language conversation.
+  id: 1
+  name: MVP — Telegram + Jellyseerr
+  steps:
+  - files:
+    - pyproject.toml
+    - src/home_agent/__init__.py
+    - src/home_agent/config.py
+    - .env.example
+    goal: Runnable Python project with validated config loading.
+    id: '1.1'
+    name: Project Scaffolding
+    notes: ''
+    scope: "- src/ package layout\n- pydantic-settings AppConfig model with fields\
+      \ for TELEGRAM_BOT_TOKEN,\n  OPENROUTER_API_KEY, JELLYSEERR_URL, JELLYSEERR_API_KEY,\
+      \ ALLOWED_TELEGRAM_IDS\n- .env.example with all keys documented\n"
+    status: done
+    test: '- test_config.py — Config loads from env vars
+
+      - Missing required vars raise ValidationError
+
+      - ALLOWED_TELEGRAM_IDS parses comma-separated list of ints
+
+      '
+  - files:
+    - src/home_agent/db.py
+    goal: Async database with schema migrations for conversations and profiles.
+    id: '1.2'
+    name: SQLite Database Layer
+    notes: ''
+    scope: '- aiosqlite connection manager
+
+      - init_db() creates tables (conversations, user_profiles)
+
+      - Helper functions: save_message(), get_history(), save_profile(), get_profile()
+
+      '
+    status: done
+    test: '- test_db.py — init_db() creates tables
+
+      - save_message() + get_history() round-trips messages per user
+
+      - save_profile() + get_profile() round-trips a profile JSON blob
+
+      - Empty history returns empty list
+
+      '
+  - files:
+    - src/home_agent/profile.py
+    goal: Pydantic models for user profile with serialization to/from SQLite.
+    id: '1.3'
+    name: User Profile Model
+    notes: ''
+    scope: '- UserProfile, MediaPreferences, NotificationPrefs Pydantic models
+
+      - ProfileManager class that reads/writes profiles via db.py
+
+      - Default profile creation for new users
+
+      '
+    status: done
+    test: '- test_profile.py — Default profile has sensible defaults
+
+      - Profile serializes to JSON and deserializes back identically
+
+      - ProfileManager creates default profile for unknown user
+
+      - ProfileManager updates and persists profile fields
+
+      '
+  - files:
+    - src/home_agent/history.py
+    goal: Store full history in SQLite, send only a sliding window to the LLM.
+    id: '1.4'
+    name: Conversation History & Processor
+    notes: ''
+    scope: "- HistoryManager class wrapping db.py for message CRUD\n- sliding_window_processor\
+      \ compatible with PydanticAI's history_processors\n  — keeps last N message\
+      \ pairs\n- User profile injected into system prompt context\n"
+    status: pending
+    test: '- test_history.py — Full history preserved in DB
+
+      - Sliding window with N=5 returns only last 5 message pairs from a 20-message
+      history
+
+      - Tool-call/tool-result pairs are not split across the window boundary
+
+      '
+  - files:
+    - src/home_agent/bot.py
+    goal: Bot connects to Telegram, receives messages, enforces user whitelist.
+    id: '1.5'
+    name: Telegram Bot Skeleton
+    notes: ''
+    scope: '- python-telegram-bot Application setup with polling (webhook later)
+
+      - Message handler that receives text
+
+      - User whitelist check against ALLOWED_TELEGRAM_IDS
+
+      - Unauthorized users get a rejection message
+
+      - Typing indicator while processing
+
+      '
+    status: pending
+    test: '- test_bot.py — Whitelisted user''s message is forwarded to handler
+
+      - Non-whitelisted user gets rejection
+
+      - Bot sends typing action before responding
+
+      '
+  - files:
+    - src/home_agent/agent.py
+    goal: Agent configured with OpenRouter, system prompt, dependency injection.
+    id: '1.6'
+    name: PydanticAI Agent Setup
+    notes: ''
+    scope: '- PydanticAI Agent with OpenRouter model (free tier)
+
+      - System prompt template that includes user profile context and confirmation
+      rules
+
+      - AgentDeps dataclass with profile_manager, history_manager, config
+
+      - Profile update tool registered on the agent
+
+      '
+    status: pending
+    test: '- test_agent.py — Agent instantiates without error
+
+      - System prompt contains user profile data when provided
+
+      - Profile update tool modifies profile via ProfileManager
+
+      '
+  - files:
+    - mcp_servers/jellyseerr/server.py
+    goal: MCP server exposing Jellyseerr search and request capabilities.
+    id: '1.7'
+    name: Jellyseerr MCP Server
+    notes: ''
+    scope: "- Search for existing community MCP server first\n- If none found/working,\
+      \ build with FastMCP\n- Core tools: search_media(query), get_media_details(id),\n\
+      \  request_media(id, quality), get_request_status(id)\n"
+    status: pending
+    test: '- test_jellyseerr_mcp.py — MCP server starts and lists expected tools
+
+      - search_media returns structured results against a mock Jellyseerr API
+
+      - request_media sends correct POST to Jellyseerr API
+
+      - Invalid media ID returns an error, not a crash
+
+      '
+  - files:
+    - src/home_agent/mcp/registry.py
+    - src/home_agent/mcp/servers.py
+    goal: Central place to configure, start, and stop MCP server connections.
+    id: '1.8'
+    name: MCP Registry & Lifecycle
+    notes: ''
+    scope: '- MCPRegistry class that holds MCP server configs
+
+      - start() / stop() lifecycle methods
+
+      - Servers configured via AppConfig
+
+      - Registry passed to agent as toolsets
+
+      '
+    status: pending
+    test: '- test_mcp_registry.py — Registry starts and stops MCP servers without
+      error
+
+      - Registry exposes tool list from connected servers
+
+      - Agent can call tools through registry
+
+      '
+  - files:
+    - src/home_agent/main.py
+    goal: 'End-to-end flow: Telegram message → Agent → MCP tools → Telegram reply.'
+    id: '1.9'
+    name: Wire It Together
+    notes: ''
+    scope: '- main() entry point that initializes config, DB, registry, agent, and
+      bot
+
+      - Message handler passes user text + history to agent, returns response to Telegram
+
+      - Conversation persisted after each exchange
+
+      - Graceful shutdown of MCP servers and DB
+
+      '
+    status: pending
+    test: "- test_integration.py — Simulated message flow: user sends \"search for\
+      \ Inception\"\n  → agent calls Jellyseerr search tool → response contains movie\
+      \ info\n- Conversation is persisted in DB after exchange\n"
+  - files:
+    - Dockerfile
+    - docker-compose.yml
+    goal: Single-command deployment on home server.
+    id: '1.10'
+    name: Docker Deployment
+    notes: ''
+    scope: '- Multi-stage Dockerfile (build + runtime)
+
+      - docker-compose.yml with env_file, volume for SQLite persistence, restart policy
+
+      - Health check endpoint (optional)
+
+      '
+    status: pending
+    test: '- docker build succeeds
+
+      - docker-compose up starts the bot without errors
+
+      - Container logs show successful Telegram connection
+
+      '
+- focus: Add system monitoring via Glances MCP server.
+  id: 2
+  name: Glances Integration
+  steps:
+  - files:
+    - mcp_servers/glances/server.py
+    goal: MCP server exposing Glances system metrics.
+    id: '2.1'
+    name: Find or Build Glances MCP Server
+    notes: ''
+    scope: "- Search GitHub / MCP registries for existing Glances MCP server\n- Evaluate\
+      \ if it covers: CPU, memory, disk, network, per-container stats\n- If none found,\
+      \ build with FastMCP wrapping Glances REST API\n- Core tools: get_system_overview(),\
+      \ get_cpu(), get_memory(), get_disk(),\n  get_network(), get_containers()\n"
+    status: pending
+    test: '- test_glances_mcp.py — MCP server starts and lists expected tools
+
+      - get_system_overview returns structured CPU/mem/disk data against a mock Glances
+      API
+
+      - Handles Glances API being unreachable gracefully
+
+      '
+  - files:
+    - src/home_agent/mcp/servers.py
+    goal: Glances MCP server loads alongside Jellyseerr on agent startup.
+    id: '2.2'
+    name: Register Glances in MCP Registry
+    notes: ''
+    scope: '- Add Glances server config
+
+      - GLANCES_URL added to AppConfig
+
+      - Registry starts both servers
+
+      '
+    status: pending
+    test: '- test_mcp_registry.py (update) — Registry with two servers starts both
+
+      - Agent tool list includes both Jellyseerr and Glances tools
+
+      '
+  - files:
+    - src/home_agent/agent.py
+    goal: Agent knows how to use system monitoring and formats stats readably.
+    id: '2.3'
+    name: System Prompt Update
+    notes: ''
+    scope: "- System prompt extended with monitoring capabilities and formatting guidance\n\
+      \  (e.g., use emoji for status indicators, warn if disk > 80%)\n"
+    status: pending
+    test: "- test_agent.py (update) — Agent presented with \"how's my server?\" generates\
+      \ a\n  response that includes CPU/memory stats (mocked MCP)\n- Agent flags high\
+      \ disk usage when disk > 80%\n"
+- focus: 'Add MCP servers one at a time. Each follows the same pattern: find existing
+    → evaluate → connect → test.'
+  id: 3
+  name: Expand Services
+  steps:
+  - files: []
+    goal: Photo management via natural language.
+    id: '3.1'
+    name: Immich MCP Server
+    notes: ''
+    scope: '- Find existing MCP server
+
+      - Tools needed: search_photos(query, date_range), get_album_list(), get_storage_stats()
+
+      - System prompt update for photo-related queries
+
+      '
+    status: pending
+    test: '- test_immich_mcp.py — Tools return structured data from mock API
+
+      - Search with date range filters correctly
+
+      - Agent responds to "show me photos from last weekend" with photo results
+
+      '
+  - files: []
+    goal: Recipe and meal plan management via natural language.
+    id: '3.2'
+    name: Mealie MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: search_recipes(query), get_meal_plan(date),\n\
+      \  add_to_meal_plan(recipe_id, date), get_shopping_list()\n- System prompt update\n"
+    status: pending
+    test: '- test_mealie_mcp.py — Recipe search returns results
+
+      - Meal plan queries return structured daily plan
+
+      - Adding to meal plan sends correct request
+
+      '
+  - files: []
+    goal: Baby tracking via natural language.
+    id: '3.3'
+    name: BabyBuddy MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: log_feeding(type, amount,\
+      \ time), log_diaper(type, time),\n  log_sleep(start, end), get_last_event(type),\
+      \ get_daily_summary()\n- System prompt update\n"
+    status: pending
+    test: '- test_babybuddy_mcp.py — Logging events sends correct data
+
+      - get_last_event("diaper") returns most recent entry
+
+      - Daily summary aggregates correctly
+
+      '
+  - files: []
+    goal: Document search and management via natural language.
+    id: '3.4'
+    name: Paperless-ngx MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: search_documents(query), get_document(id),\n\
+      \  add_tag(doc_id, tag), get_tags()\n- System prompt update\n"
+    status: pending
+    test: '- test_paperless_mcp.py — Document search returns results with title, date,
+      tags
+
+      - Tag operations modify document metadata correctly
+
+      '
+  - files: []
+    goal: Task management via natural language.
+    id: '3.5'
+    name: Vikunja MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: get_tasks(list, filter), create_task(title,\
+      \ list, due_date),\n  complete_task(id), get_lists()\n- System prompt update\n"
+    status: pending
+    test: '- test_vikunja_mcp.py — Task creation returns task with ID
+
+      - Listing tasks returns structured list
+
+      - Completing a task updates its status
+
+      '
+  - files: []
+    goal: Service uptime monitoring via natural language.
+    id: '3.6'
+    name: Uptime Kuma MCP Server
+    notes: ''
+    scope: '- Find existing MCP server
+
+      - Tools needed: get_monitors(), get_monitor_status(id), get_heartbeat(id)
+
+      - System prompt update
+
+      '
+    status: pending
+    test: '- test_uptimekuma_mcp.py — Monitor list returns all configured monitors
+      with status
+
+      - Heartbeat returns uptime percentage
+
+      - Agent responds to "is everything online?" with a summary
+
+      '
+  - files: []
+    goal: Docker container management via natural language.
+    id: '3.7'
+    name: Portainer MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: list_containers(), get_container(name),\n\
+      \  restart_container(name), get_container_logs(name, lines)\n- System prompt\
+      \ update\n- Confirmation required for restart/stop actions\n"
+    status: pending
+    test: '- test_portainer_mcp.py — Container listing returns names and statuses
+
+      - Restart sends correct API call
+
+      - Agent asks for confirmation before restarting
+
+      '
+  - files: []
+    goal: Backup status monitoring via natural language.
+    id: '3.8'
+    name: Duplicati MCP Server
+    notes: ''
+    scope: '- Find existing MCP server
+
+      - Tools needed: list_backups(), get_backup_status(id), get_last_run(id)
+
+      - System prompt update
+
+      '
+    status: pending
+    test: '- test_duplicati_mcp.py — Backup listing returns backup jobs with last
+      run time
+
+      - Status shows healthy/warning/error state
+
+      '
+  - files:
+    - src/home_agent/mcp/registry.py
+    goal: Only load relevant MCP servers per conversation to reduce token cost.
+    id: '3.9'
+    name: Tool Filtering & Context-Aware Loading
+    notes: ''
+    scope: '- Classify incoming message to determine which MCP servers are relevant
+
+      - Lazy-connect only those servers for the agent call
+
+      - Disconnect idle servers after timeout
+
+      '
+    status: pending
+    test: '- test_tool_filtering.py — Message "search for a movie" only loads Jellyseerr
+      tools
+
+      - Message "how''s my server" only loads Glances tools
+
+      - Message "is everything online" only loads Uptime Kuma tools
+
+      - Ambiguous message loads all tools
+
+      '
+- focus: Rich UX, proactive behavior, multi-user, and extended capabilities.
+  id: 4
+  name: Polish & Advanced Features
+  steps:
+  - files:
+    - src/home_agent/tools/telegram_tools.py
+    goal: Responses use inline keyboards, images, and formatted text.
+    id: '4.1'
+    name: Rich Telegram Formatting
+    notes: ''
+    scope: '- Agent tool to send inline keyboard buttons (e.g., confirm/deny)
+
+      - Agent tool to send images (movie posters fetched from TMDB/Jellyseerr)
+
+      - Markdown formatting for structured responses
+
+      '
+    status: pending
+    test: '- test_telegram_tools.py — Inline keyboard tool produces correct Telegram
+      markup
+
+      - Image tool fetches and sends a photo message
+
+      - Markdown output is valid Telegram MarkdownV2
+
+      '
+  - files:
+    - src/home_agent/notifications.py
+    goal: Bot notifies user when downloads complete or issues arise.
+    id: '4.2'
+    name: Proactive Notifications
+    notes: ''
+    scope: '- Periodic poller (or Jellyseerr webhook receiver) that checks for completed
+      downloads
+
+      - Pushes notification to user via Telegram
+
+      - Respects quiet_hours from user profile
+
+      '
+    status: pending
+    test: '- test_notifications.py — Completed download triggers a Telegram message
+
+      - Notification suppressed during quiet hours
+
+      - Duplicate notifications are not sent
+
+      '
+  - files:
+    - src/home_agent/profile.py
+    - src/home_agent/bot.py
+    goal: Multiple users with separate profiles and permission levels.
+    id: '4.3'
+    name: Multi-User Support
+    notes: ''
+    scope: '- Per-user profile isolation
+
+      - Permission levels (admin, user, read-only)
+
+      - Admin can manage other users'' permissions via chat
+
+      '
+    status: pending
+    test: '- test_multi_user.py — Two users have separate profiles and histories
+
+      - Read-only user can search but not request
+
+      - Admin can modify permissions
+
+      '
+  - files:
+    - src/home_agent/bot.py
+    goal: User sends voice message, agent processes it as text.
+    id: '4.4'
+    name: Voice Message Support
+    notes: ''
+    scope: '- Voice message handler that downloads audio
+
+      - Transcription via Whisper (local or API)
+
+      - Transcribed text fed to agent as normal message
+
+      '
+    status: pending
+    test: '- test_voice.py — Voice message handler extracts audio file
+
+      - Transcription produces text
+
+      - Agent receives transcribed text and responds normally
+
+      '
+  - files: []
+    goal: File conversion capabilities via natural language.
+    id: '4.5'
+    name: IT Tools / BentoPDF / Vert Integration
+    notes: ''
+    scope: '- Find existing MCP servers
+
+      - Tools needed: convert_file(input_path, output_format), list_supported_formats()
+
+      - Agent can receive a file via Telegram, convert it, and send back the result
+
+      '
+    status: pending
+    test: '- test_conversion_mcp.py — Supported formats list is returned
+
+      - Conversion request sends correct payload
+
+      - Agent handles unsupported format gracefully with a helpful message
+
+      '
+project: home-agent

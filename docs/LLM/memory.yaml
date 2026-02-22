@@ -1,0 +1,155 @@
+# memory.yaml — Home Agent Project Memory
+# Living document tracking project history, decisions, and current state.
+# LLM agents read this before starting any work to understand context.
+# Updated after each completed step by autodev.
+
+project: home-agent
+last_updated: "2026-02-13"
+
+current_state:
+  phase: 1
+  step: "1.3"
+  description: "Phase 1 — Steps 1.1 (scaffolding), 1.2 (database layer), and 1.3 (user profile model) complete"
+  working_features:
+    - "Config loading from .env via pydantic-settings"
+    - "SQLite async database with conversations and user_profiles tables"
+    - "Message save/retrieve and profile save/retrieve functions"
+    - "Pydantic user profile models (UserProfile, MediaPreferences, NotificationPrefs)"
+    - "ProfileManager with async get/save and automatic default profile creation"
+  known_issues: []
+
+completed_steps:
+  - step: "1.1"
+    name: "Project Scaffolding"
+    date: "2026-02-13"
+    summary: "Created project structure with uv, pydantic-settings AppConfig, .env.example"
+    decisions:
+      - "Used pydantic-settings for config with env vars"
+      - "ALLOWED_TELEGRAM_IDS parses as comma-separated list of ints"
+    issues: []
+
+  - step: "1.2"
+    name: "SQLite Database Layer"
+    date: "2026-02-13"
+    summary: "Async SQLite layer with aiosqlite. init_db(), save/get for messages and profiles."
+    decisions:
+      - "Used aiosqlite for async DB access"
+      - "Single file SQLite, sufficient for home server use case"
+    issues: []
+
+  - step: "1.3"
+    name: "User Profile Model"
+    date: "2026-02-13"
+    summary: "Pydantic models for user profiles (UserProfile, MediaPreferences, NotificationPrefs) and ProfileManager class with async get/save for database persistence via db.py."
+    decisions:
+      - "Used model_dump(mode='json') for serialization to ensure datetime/time objects are stored as ISO strings"
+      - "ProfileManager uses model_copy() for immutable profile updates rather than in-place mutation"
+      - "Default profile template pattern allows customization via constructor injection"
+      - "user_id stored as DB key, not in the serialized data blob"
+    issues: []
+
+architecture_decisions:
+  - id: "AD-001"
+    title: "PydanticAI over LangGraph/Haystack"
+    date: "2026-02-13"
+    decision: "Use PydanticAI as the agent framework"
+    rationale: >
+      Model-agnostic, native MCP support, history_processors for token cost control,
+      dependency injection, Pythonic. LangGraph's interrupt()/graph machinery is overkill —
+      Telegram's message flow is the human-in-the-loop. Haystack's pipeline model is
+      optimized for RAG, not conversational agents.
+    status: final
+
+  - id: "AD-002"
+    title: "MCP for Service Integration (Prefer Existing)"
+    date: "2026-02-13"
+    decision: "Use MCP to connect to home server services. Search for existing community MCP servers first."
+    rationale: "Standard protocol, decoupled, reusable. Avoids hand-writing tool wrappers."
+    status: final
+
+  - id: "AD-003"
+    title: "OpenRouter Free Tier Only"
+    date: "2026-02-13"
+    decision: "All LLM calls use free-tier models via OpenRouter. $10 top-up for 1000 free requests/day."
+    rationale: "Cost constraint. Free models are capable enough. Token management via sliding window + user profile."
+    status: final
+
+  - id: "AD-004"
+    title: "Evolving User Profile for Personalization"
+    date: "2026-02-13"
+    decision: "Agent maintains a per-user profile that evolves over time, injected into system prompt."
+    rationale: "Token-efficient personalization. Sliding window loses old context but profile persists key observations."
+    status: final
+
+  - id: "AD-005"
+    title: "Telegram Conversation as Human-in-the-Loop"
+    date: "2026-02-13"
+    decision: "No programmatic interrupt mechanism. Agent decides when to ask for confirmation via system prompt."
+    rationale: "Natural conversational flow. Simpler than LangGraph's interrupt/resume."
+    status: final
+
+  - id: "AD-006"
+    title: "SQLite for Persistence"
+    date: "2026-02-13"
+    decision: "SQLite for conversation history and user profiles."
+    rationale: "Zero-dependency, single file on disk, sufficient for single/few users on a home server."
+    status: final
+
+home_server_services:
+  - name: Jellyseerr
+    purpose: "Media requests & discovery"
+    mcp_status: not_researched
+    phase: 1
+  - name: Glances
+    purpose: "System monitoring"
+    mcp_status: not_researched
+    phase: 2
+  - name: Immich
+    purpose: "Photo management"
+    mcp_status: not_researched
+    phase: 3
+  - name: Mealie
+    purpose: "Recipe management"
+    mcp_status: not_researched
+    phase: 3
+  - name: BabyBuddy
+    purpose: "Baby tracking"
+    mcp_status: not_researched
+    phase: 3
+  - name: Paperless-ngx
+    purpose: "Document management"
+    mcp_status: not_researched
+    phase: 3
+  - name: Vikunja
+    purpose: "Task management"
+    mcp_status: not_researched
+    phase: 3
+  - name: Portainer
+    purpose: "Docker management"
+    mcp_status: not_researched
+    phase: 3
+  - name: Duplicati
+    purpose: "Backup management"
+    mcp_status: not_researched
+    phase: 3
+  - name: Uptime Kuma
+    purpose: "Uptime monitoring"
+    mcp_status: not_researched
+    phase: 3
+  - name: IT Tools
+    purpose: "Utility tools"
+    mcp_status: not_researched
+    phase: 4
+  - name: BentoPDF/Vert
+    purpose: "File conversion"
+    mcp_status: not_researched
+    phase: 4
+
+lessons_learned: []
+# - id: "LL-001"
+#   title: "Lesson title"
+#   date: "YYYY-MM-DD"
+#   context: "What were we doing?"
+#   problem: "What went wrong?"
+#   resolution: "How did we fix it?"
+#   takeaway: "What should we do differently?"

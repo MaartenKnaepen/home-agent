@@ -15,3 +15,76 @@ dependencies = [
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.10",
+    "ty>=0.0.17",
+]
+
+[tool.ty.rules]
+# pydantic-settings loads required fields from env vars at runtime;
+# ty can't know this so we suppress the false positive
+missing-argument = "ignore"
+
+[tool.importlinter]
+root_packages = ["home_agent"]
+
+# Layer 0 — config: no internal imports allowed
+[[tool.importlinter.contracts]]
+name = "config is independent"
+type = "forbidden"
+source_modules = ["home_agent.config"]
+forbidden_modules = [
+    "home_agent.db",
+    "home_agent.profile",
+    "home_agent.history",
+    "home_agent.agent",
+    "home_agent.bot",
+    "home_agent.tools",
+    "home_agent.mcp",
+]
+
+# Layer 1 — db: only imports config and shared
+[[tool.importlinter.contracts]]
+name = "db only imports config and shared"
+type = "forbidden"
+source_modules = ["home_agent.db"]
+forbidden_modules = [
+    "home_agent.profile",
+    "home_agent.history",
+    "home_agent.agent",
+    "home_agent.bot",
+    "home_agent.tools",
+    "home_agent.mcp",
+]
+
+# Layer 2 — tools and mcp: no imports from agent, bot, main
+# Uncomment when home_agent.tools and home_agent.mcp exist
+# [[tool.importlinter.contracts]]
+# name = "tools and mcp do not import agent or bot"
+# type = "forbidden"
+# source_modules = ["home_agent.tools", "home_agent.mcp"]
+# forbidden_modules = [
+#     "home_agent.agent",
+#     "home_agent.bot",
+#     "home_agent.main",
+# ]
+
+# Layer 3 — agent and bot: no circular imports with each other or main
+# Uncomment when home_agent.agent and home_agent.bot exist
+# [[tool.importlinter.contracts]]
+# name = "agent does not import bot or main"
+# type = "forbidden"
+# source_modules = ["home_agent.agent"]
+# forbidden_modules = [
+#     "home_agent.bot",
+#     "home_agent.main",
+# ]
+
+# [[tool.importlinter.contracts]]
+# name = "bot does not import main"
+# type = "forbidden"
+# source_modules = ["home_agent.bot"]
+# forbidden_modules = ["home_agent.main"]
+

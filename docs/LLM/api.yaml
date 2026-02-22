@@ -1,0 +1,79 @@
+# api.yaml — Home Agent Public API Reference
+# Lists every public function, class, and tool in the project.
+# LLM agents read this before implementing new code to discover reusable pieces.
+# Updated after each completed step by autodev.
+
+modules:
+  # ── src/home_agent/config.py ────────────────────────────────────────────────
+  - module: "src/home_agent/config.py"
+    exports:
+      - name: "AppConfig"
+        type: "class"
+        signature: "BaseSettings"
+        description: "Application configuration loaded from environment variables via pydantic-settings."
+
+      - name: "get_config"
+        type: "function"
+        signature: "() -> AppConfig"
+        description: "Singleton accessor for the global AppConfig instance."
+
+  # ── src/home_agent/db.py ────────────────────────────────────────────────────
+  - module: "src/home_agent/db.py"
+    exports:
+      - name: "init_db"
+        type: "function"
+        signature: "async (db_path: str | Path) -> None"
+        description: "Initialize the SQLite database schema (conversations and user_profiles tables)."
+
+      - name: "save_message"
+        type: "function"
+        signature: "async (db_path: str | Path, *, user_id: int, role: str, content: str) -> None"
+        description: "Save a conversation message to the database."
+
+      - name: "get_history"
+        type: "function"
+        signature: "async (db_path: str | Path, *, user_id: int, limit: int | None = None) -> list[dict[str, str]]"
+        description: "Fetch recent conversation history for a user, oldest first."
+
+      - name: "save_profile"
+        type: "function"
+        signature: "async (db_path: str | Path, *, user_id: int, data: dict[str, Any]) -> None"
+        description: "Persist a user profile payload (upsert by user_id)."
+
+      - name: "get_profile"
+        type: "function"
+        signature: "async (db_path: str | Path, *, user_id: int) -> dict[str, Any] | None"
+        description: "Retrieve a stored user profile payload, or None if missing."
+
+  # ── src/home_agent/profile.py ───────────────────────────────────────────────
+  - module: "src/home_agent/profile.py"
+    exports:
+      - name: "MediaPreferences"
+        type: "class"
+        signature: "BaseModel"
+        description: "Genre, quality, and language preferences for media consumption."
+
+      - name: "NotificationPrefs"
+        type: "class"
+        signature: "BaseModel"
+        description: "Notification settings including enabled flag, quiet hours, and per-source toggles."
+
+      - name: "UserProfile"
+        type: "class"
+        signature: "BaseModel"
+        description: "Complete user profile with preferences, notes, statistics, and personal details."
+
+      - name: "ProfileManager"
+        type: "class"
+        signature: "__init__(db_path: str | Path, *, default_profile: UserProfile | None = None)"
+        description: "CRUD operations for user profiles with automatic default profile creation for new users."
+
+      - name: "ProfileManager.get"
+        type: "method"
+        signature: "async (user_id: int) -> UserProfile"
+        description: "Get user profile from DB, or create and persist a default one if not found."
+
+      - name: "ProfileManager.save"
+        type: "method"
+        signature: "async (profile: UserProfile) -> None"
+        description: "Persist a user profile to the database, updating the updated_at timestamp."
