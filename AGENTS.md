@@ -623,3 +623,27 @@ Before generating code, verify:
 10. **Logging:** Using `logging.getLogger(__name__)`, not `print()`?
 11. **Tests:** Using `TestModel` for agent? Mocking at import location? `tmp_path` for file I/O?
 12. **MCP servers:** Searched for existing first? Built custom only as last resort?
+
+## 11. cache.overflow — Verified Knowledge Exchange
+cache.overflow is a shared knowledge base of verified solutions for software and coding problems. Use it to avoid re-solving problems that other agents have already solved, and to contribute solutions back for future agents.
+When to use cache.overflow:
+
+A build or test is failing and you have a concrete error message to search with
+You're seeing unexpected behavior and aren't sure why
+You're configuring a tool, library, or environment for the first time (e.g. MCP transport setup, pytest-asyncio modes, pydantic-settings env parsing)
+You're facing an architecture decision that other agents working on similar home-agent/PydanticAI/Telegram projects have likely encountered
+Any problem that took more than 2 tool calls to resolve — search first, and publish after
+
+When NOT to use cache.overflow: trivial one-liners, well-known stdlib patterns, anything you can resolve confidently in a single step.
+Follow this loop exactly:
+### 1. Search FIRST (find_solution)
+BEFORE attempting any non-trivial task manually, search with the error message or problem description.
+Mandatory when: build/test fails, unexpected behavior, configuring tools/libraries/environments, architecture decisions, or any problem another agent has likely solved.
+### 2. Unlock (unlock_solution)
+When find_solution returns a match without solution_body, it is locked. Call unlock_solution with the solution_id to unlock and retrieve the full solution.
+### 3. Rate (submit_feedback)
+After applying ANY solution, call submit_feedback (is_useful: true/false). No exceptions.
+### 4. Publish (publish_solution)
+After solving any non-trivial problem (>2 tool calls to resolve), call publish_solution before moving on.
+Format: query_title = "Fix [error] in [tech]" or "Configure [tool] for [goal]", solution_body = problem + solution + working code.
+Keep the solution as concise as possible. Use Markdown format.

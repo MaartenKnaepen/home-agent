@@ -1,13 +1,14 @@
 """Telegram bot wiring for home-agent.
 
 Adheres to home-agent coding standards: type hints, Google-style docstrings, async-first.
-Business logic lives in agent.py (step 1.6). This module is Telegram wiring only.
+Business logic lives in agent.py. This module is Telegram wiring only.
 """
 
 from __future__ import annotations
 
 import logging
 
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -17,18 +18,27 @@ from telegram.ext import (
     filters,
 )
 
+from home_agent.agent import agent, AgentDeps
 from home_agent.config import AppConfig
+from home_agent.history import HistoryManager
+from home_agent.profile import ProfileManager
 
 logger = logging.getLogger(__name__)
 
 _REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
 
 
-def make_message_handler(config: AppConfig):
-    """Create a Telegram message handler closure that captures app config.
+def make_message_handler(
+    config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+):
+    """Create a Telegram message handler closure that captures app config and managers.
 
     Args:
         config: Application configuration containing the allowed user whitelist.
+        profile_manager: Manages user profile persistence.
+        history_manager: Manages conversation history persistence.
 
     Returns:
         An async handler coroutine compatible with python-telegram-bot.
@@ -39,8 +49,8 @@ def make_message_handler(config: AppConfig):
     ) -> None:
         """Handle an incoming Telegram text message.
 
-        Enforces the whitelist, sends a typing indicator, then replies with a
-        stub response (will be replaced by agent call in step 1.6).
+        Enforces the whitelist, sends a typing indicator, calls the agent,
+        and persists both turns of the conversation.
 
         Args:
             update: The incoming Telegram update.
@@ -62,39 +72,85 @@ def make_message_handler(config: AppConfig):
             await update.effective_chat.send_action(action=ChatAction.TYPING)
 
         text = update.message.text or ""
-        reply = f"[Agent stub] You said: {text}"
+
+        # Load user profile
+        user_profile = await profile_manager.get(user_id)
+
+        # Load and convert conversation history to PydanticAI ModelMessage objects
+        raw_history = await history_manager.get_history(user_id=user_id)
+        message_history = []
+        for entry in raw_history:
+            role = entry.get("role", "")
+            content = entry.get("content", "")
+            if role == "user":
+                message_history.append(
+                    ModelRequest(parts=[UserPromptPart(content=content)])
+                )
+            elif role == "assistant":
+                message_history.append(
+                    ModelResponse(parts=[TextPart(content=content)])
+                )
+
+        deps = AgentDeps(
+            config=config,
+            profile_manager=profile_manager,
+            history_manager=history_manager,
+            user_profile=user_profile,
+        )
+
+        async with agent:
+            result = await agent.run(text, deps=deps, message_history=message_history)
+
+        reply = result.output
+
+        # Persist both turns
+        await history_manager.save_message(user_id=user_id, role="user", content=text)
+        await history_manager.save_message(user_id=user_id, role="assistant", content=reply)
+
         await update.message.reply_text(reply)
-        logger.debug("Sent stub reply to user %d", user_id)
+        logger.debug("Sent agent reply to user %d", user_id)
 
     return handle_message
 
 
-def create_application(config: AppConfig) -> Application:
+def create_application(
+    config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+) -> Application:
     """Build and return a configured Telegram Application.
 
     Does NOT start polling — the caller is responsible for that.
 
     Args:
         config: Application configuration used to wire the bot token and handlers.
+        profile_manager: Manages user profile persistence.
+        history_manager: Manages conversation history persistence.
 
     Returns:
         A fully configured :class:`telegram.ext.Application` instance.
     """
     token = config.telegram_bot_token.get_secret_value()
     app: Application = Application.builder().token(token).build()
-    handler = make_message_handler(config)
+    handler = make_message_handler(config, profile_manager, history_manager)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     logger.info("Telegram application configured with whitelist: %s", config.allowed_telegram_ids)
     return app
 
 
-def run_bot(config: AppConfig) -> None:
+def run_bot(
+    config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+) -> None:
     """Build the Telegram application and start polling for updates.
 
     Blocks until the bot is stopped (e.g. via Ctrl-C).
 
     Args:
         config: Application configuration.
+        profile_manager: Manages user profile persistence.
+        history_manager: Manages conversation history persistence.
     """
     logger.info("Starting Telegram bot polling…")
-    create_application(config).run_polling()
+    create_application(config, profile_manager, history_manager).run_polling()

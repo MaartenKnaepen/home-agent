@@ -8,8 +8,8 @@ last_updated: "2026-02-22"
 
 current_state:
   phase: 1
-  step: "1.5"
-  description: "Phase 1 — Steps 1.1 (scaffolding), 1.2 (database layer), 1.3 (user profile model), 1.4 (conversation history & processor), and 1.5 (Telegram bot skeleton) complete"
+  step: "1.6"
+  description: "Phase 1 — Steps 1.1 (scaffolding), 1.2 (database layer), 1.3 (user profile model), 1.4 (conversation history & processor), 1.5 (Telegram bot skeleton), and 1.6 (PydanticAI Agent Setup) complete"
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -19,6 +19,8 @@ current_state:
     - "HistoryManager wrapping db.py for conversation history CRUD"
     - "sliding_window_processor for PydanticAI history_processors (last N pairs)"
     - "Telegram bot with whitelist enforcement and typing indicator"
+    - "PydanticAI agent with AgentDeps, dynamic system prompt, update_user_note tool"
+    - "bot.py wired to call agent and persist conversation history"
   known_issues: []
 
 completed_steps:
@@ -61,6 +63,18 @@ completed_steps:
       - "create_application() returns Application without starting polling so callers control lifecycle"
     issues: []
 
+  - step: "1.6"
+    name: "PydanticAI Agent Setup"
+    date: "2026-02-22"
+    summary: "agent.py with AgentDeps dataclass, OpenRouter model, dynamic system prompt injecting UserProfile, update_user_note tool. bot.py wired to call agent and persist history."
+    decisions:
+      - "Used openrouter:qwen/qwq-32b:free as the model"
+      - "sliding_window_processor(n=20) used as history_processors to limit token cost"
+      - "Dynamic system_prompt injects user profile at call time via @agent.system_prompt(dynamic=True)"
+      - "bot.py uses async with agent: for lifecycle management per coding guidelines"
+      - "History persisted as raw role/content strings in DB; converted to ModelMessage on load"
+    issues: []
+
   - step: "1.4"
     name: "Conversation History & Processor"
     date: "2026-02-13"
@@ -81,6 +95,9 @@ completed_steps:
           concerns defined in the architecture. This is deferred to Step 1.6 (Agent definition)
           where agent.py will use @agent.system_prompt(dynamic=True) to inject UserProfile data.
         target_step: "1.6"
+        status: "resolved"
+        resolved_in: "1.6"
+        resolution: "inject_user_profile() dynamic system prompt in agent.py injects UserProfile data per AGENTS.md architecture."
     issues: []
 
 architecture_decisions:

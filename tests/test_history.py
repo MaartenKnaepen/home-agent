@@ -272,18 +272,26 @@ def test_sliding_window_tool_call_pairs_not_split() -> None:
         assert isinstance(result[i + 1], ModelResponse), f"Expected ModelResponse at index {i + 1}"
 
 
-def test_sliding_window_trailing_unpaired_request_excluded() -> None:
-    """A trailing ModelRequest without a paired ModelResponse is excluded."""
+def test_sliding_window_trailing_unpaired_request_preserved() -> None:
+    """A trailing ModelRequest without a paired ModelResponse is preserved.
+
+    PydanticAI calls history_processors on every model step, including the first
+    step where the current user message is an unpaired ModelRequest at the end.
+    The processor must preserve it so PydanticAI's contract (result ends with a
+    ModelRequest) is satisfied.
+    """
     messages = _make_messages(3)
-    # Append an unpaired request at the end
+    # Append an unpaired request at the end (simulates the current user message)
     lone_req = ModelRequest(parts=[UserPromptPart(content="lone request")])
     messages.append(lone_req)
 
     processor = sliding_window_processor(n=5)
     result = processor(messages)
 
-    # Only the 3 complete pairs should be in the result
-    assert len(result) == 6
-    for i in range(0, len(result), 2):
+    # 3 complete pairs (6 messages) + the trailing unpaired request = 7
+    assert len(result) == 7
+    assert result[-1] is lone_req
+    # All except the last should form complete pairs
+    for i in range(0, len(result) - 1, 2):
         assert isinstance(result[i], ModelRequest)
         assert isinstance(result[i + 1], ModelResponse)

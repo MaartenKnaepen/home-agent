@@ -1,11 +1,12 @@
 """Tests for src/home_agent/bot.py.
 
-Covers whitelist enforcement, typing indicator, and stub response behaviour.
+Covers whitelist enforcement, typing indicator, and agent response behaviour.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import Chat, Message, Update, User
@@ -13,6 +14,8 @@ from telegram.constants import ChatAction
 
 from home_agent.bot import make_message_handler
 from home_agent.config import AppConfig
+from home_agent.history import HistoryManager
+from home_agent.profile import ProfileManager
 
 
 # ---------------------------------------------------------------------------
@@ -56,27 +59,40 @@ def make_test_update(text: str, user_id: int = 123) -> Update:
 
 
 @pytest.mark.asyncio
-async def test_authorized_user_gets_stub_response(mock_config: AppConfig) -> None:
-    """Whitelisted user receives the stub echo reply."""
-    update = make_test_update("hello world", user_id=123)
-    context = MagicMock()
+async def test_authorized_user_gets_agent_response(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """Whitelisted user receives the agent's reply."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
 
-    handler = make_message_handler(mock_config)
-    await handler(update, context)
+    mock_result = MagicMock()
+    mock_result.output = "Agent response"
 
-    update.message.reply_text.assert_called_once()
-    call_args = update.message.reply_text.call_args
-    reply_text: str = call_args[0][0]
-    assert "[Agent stub] You said: hello world" in reply_text
+    with patch("home_agent.bot.agent") as mock_agent:
+        mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+        mock_agent.__aexit__ = AsyncMock(return_value=False)
+        mock_agent.run = AsyncMock(return_value=mock_result)
+
+        handler = make_message_handler(mock_config, profile_manager, history_manager)
+        update = make_test_update("hello", user_id=123)
+        await handler(update, MagicMock())
+
+    update.message.reply_text.assert_called_once_with("Agent response")
 
 
 @pytest.mark.asyncio
-async def test_unauthorized_user_gets_rejection(mock_config: AppConfig) -> None:
+async def test_unauthorized_user_gets_rejection(
+    mock_config: AppConfig, test_db: Path
+) -> None:
     """Non-whitelisted user receives the rejection message and no typing action."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
     update = make_test_update("hello", user_id=99999)
     context = MagicMock()
 
-    handler = make_message_handler(mock_config)
+    handler = make_message_handler(mock_config, profile_manager, history_manager)
     await handler(update, context)
 
     update.message.reply_text.assert_called_once()
@@ -89,13 +105,24 @@ async def test_unauthorized_user_gets_rejection(mock_config: AppConfig) -> None:
 
 
 @pytest.mark.asyncio
-async def test_typing_action_sent_before_response(mock_config: AppConfig) -> None:
-    """Typing indicator is sent before the stub reply for authorized users."""
-    update = make_test_update("ping", user_id=456)
-    context = MagicMock()
+async def test_typing_action_sent_before_response(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """Typing indicator is sent before the agent reply for authorized users."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
 
-    handler = make_message_handler(mock_config)
-    await handler(update, context)
+    mock_result = MagicMock()
+    mock_result.output = "pong"
+
+    with patch("home_agent.bot.agent") as mock_agent:
+        mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+        mock_agent.__aexit__ = AsyncMock(return_value=False)
+        mock_agent.run = AsyncMock(return_value=mock_result)
+
+        handler = make_message_handler(mock_config, profile_manager, history_manager)
+        update = make_test_update("ping", user_id=456)
+        await handler(update, MagicMock())
 
     update.effective_chat.send_action.assert_called_once_with(action=ChatAction.TYPING)
     update.message.reply_text.assert_called_once()

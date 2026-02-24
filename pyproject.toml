@@ -86,15 +86,14 @@ forbidden_modules = [
 # ]
 
 # Layer 3 — agent and bot: no circular imports with each other or main
-# Uncomment when home_agent.agent and home_agent.bot exist
-# [[tool.importlinter.contracts]]
-# name = "agent does not import bot or main"
-# type = "forbidden"
-# source_modules = ["home_agent.agent"]
-# forbidden_modules = [
-#     "home_agent.bot",
-#     "home_agent.main",
-# ]
+[[tool.importlinter.contracts]]
+name = "agent does not import bot or main"
+type = "forbidden"
+source_modules = ["home_agent.agent"]
+forbidden_modules = [
+    "home_agent.bot",
+    "home_agent.main",
+]
 
 [[tool.importlinter.contracts]]
 name = "bot does not import main"

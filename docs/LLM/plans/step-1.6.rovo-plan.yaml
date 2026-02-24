@@ -1,0 +1,403 @@
+step: "1.6"
+name: "PydanticAI Agent Setup"
+phase: 1
+goal: "Agent configured with OpenRouter, system prompt, dependency injection."
+
+context:
+  description: |
+    Step 1.6 creates the PydanticAI agent definition in agent.py. The agent connects
+    to OpenRouter (free tier), uses a system prompt that includes user profile context,
+    and has dependency injection for ProfileManager and HistoryManager. This step also
+    creates the first agent tool (update_user_note) for profile updates.
+
+    Per AGENTS.md, the agent must use:
+    - Async context manager (async with agent:) for MCP/toolset lifecycle
+    - FastMCPToolset from pydantic_ai.toolsets.fastmcp (not deprecated run_mcp_servers())
+    - RunContext[AgentDeps] for tool functions
+    - TestModel for tests (never call real LLMs)
+
+    Existing modules to leverage:
+    - config.py: AppConfig with TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, etc.
+    - profile.py: UserProfile, ProfileManager with async get/save
+    - history.py: HistoryManager, sliding_window_processor
+    - db.py: init_db, save_message, get_history
+  dependencies:
+    - "src/home_agent/config.py"
+    - "src/home_agent/profile.py"
+    - "src/home_agent/history.py"
+    - "src/home_agent/db.py"
+  references:
+    - "AGENTS.md — Agent Definition Template (p.2)"
+    - "AGENTS.md — PydanticAI Critical Rules (p.3)"
+    - "AGENTS.md — Testing Patterns (p.7)"
+    - "api.yaml — existing exports from config, db, profile, history modules"
+    - "memory.yaml — Step 1.5 completed, DEFER-1.4-001 resolved in this step"
+
+tasks:
+  - id: 1
+    title: "Create agent.py with PydanticAI Agent definition"
+    file: "src/home_agent/agent.py"
+    action: "create"
+    description: |
+      Create the PydanticAI agent with OpenRouter model, system prompt, and dependency injection.
+
+      Required imports:
+      - from dataclasses import dataclass
+      - from pydantic_ai import Agent, RunContext
+      - from home_agent.config import AppConfig, get_config
+      - from home_agent.profile import ProfileManager, UserProfile
+      - from home_agent.history import HistoryManager
+
+      Create AgentDeps dataclass with fields:
+      - config: AppConfig
+      - profile_manager: ProfileManager
+      - history_manager: HistoryManager
+      - user_profile: UserProfile
+
+      Create the agent instance:
+      - Model: "openrouter:meta-llama/llama-3-8b-instruct:free" (or similar free tier)
+      - deps_type: AgentDeps
+      - system_prompt: Template that describes the agent's role as a home server assistant
+
+      The system prompt should mention:
+      - The agent helps users control home services via natural language
+      - It can search/request media, monitor system stats, manage tasks
+      - It should ask for confirmation before destructive actions
+      - User profile context will be injected dynamically
+
+      Add the dynamic system prompt function:
+      - @agent.system_prompt(dynamic=True)
+      - async def inject_user_profile(ctx: RunContext[AgentDeps]) -> str
+      - Returns a string with user name and key preferences from ctx.deps.user_profile
+    code_snippet: |
+      """PydanticAI agent for home server management.
+
+      Adheres to home-agent coding standards: type hints, Google-style docstrings, async-first.
+      """
+
+      from dataclasses import dataclass
+
+      from pydantic_ai import Agent, RunContext
+
+      from home_agent.config import AppConfig, get_config
+      from home_agent.profile import ProfileManager, UserProfile
+      from home_agent.history import HistoryManager
+
+
+      @dataclass
+      class AgentDeps:
+          """Dependencies injected into the agent at runtime.
+
+          Attributes:
+              config: Application configuration.
+              profile_manager: Manages user profile persistence.
+              history_manager: Manages conversation history.
+              user_profile: The current user's profile.
+          """
+
+          config: AppConfig
+          profile_manager: ProfileManager
+          history_manager: HistoryManager
+          user_profile: UserProfile
+
+
+      agent = Agent(
+          "openrouter:meta-llama/llama-3-8b-instruct:free",
+          deps_type=AgentDeps,
+          system_prompt=(
+              "You are a home server assistant that helps users control their home services "
+              "via natural language. You can search and request media through Jellyseerr, "
+              "monitor system stats via Glances, manage tasks, and more. "
+              "Always ask for confirmation before performing destructive actions like "
+              "restarting containers or deleting files. Be helpful, concise, and friendly."
+          ),
+      )
+
+
+      @agent.system_prompt(dynamic=True)
+      async def inject_user_profile(ctx: RunContext[AgentDeps]) -> str:
+          """Inject user profile into the system prompt dynamically."""
+          profile = ctx.deps.user_profile
+          return (
+              f"Current user: {profile.name}. "
+              f"Media preferences: genres={profile.media_preferences.preferred_genres}, "
+              f"quality={profile.media_preferences.preferred_quality}, "
+              f"language={profile.media_preferences.preferred_language}."
+          )
+    tests:
+      - "test_agent.py — Agent instantiates without error"
+      - "test_agent.py — deps_type is AgentDeps"
+      - "test_agent.py — system_prompt is set"
+
+  - id: 2
+    title: "Add update_user_note tool to agent"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      Add the first agent tool that allows the LLM to update the user's profile with notes.
+
+      Create the tool function:
+      - @agent.tool
+      - async def update_user_note(ctx: RunContext[AgentDeps], note: str) -> str
+      - Appends the note to profile.notes list
+      - Calls profile_manager.save(profile) to persist
+      - Returns a confirmation string
+
+      This tool demonstrates the pattern for future tools and enables the agent to
+      learn user preferences over time.
+    code_snippet: |
+      @agent.tool
+      async def update_user_note(ctx: RunContext[AgentDeps], note: str) -> str:
+          """Add an observation about the user to their profile.
+
+          Args:
+              ctx: Runtime context with dependencies.
+              note: Free-form note about the user's preferences or behavior.
+
+          Returns:
+              Confirmation message.
+          """
+          profile = ctx.deps.user_profile.model_copy()
+          profile.notes.append(note)
+          await ctx.deps.profile_manager.save(profile)
+          return f"Noted: {note}"
+    tests:
+      - "test_agent.py — Profile update tool modifies profile via ProfileManager"
+      - "test_agent.py — Tool returns confirmation string"
+      - "test_agent.py — Note is appended to profile.notes and persisted"
+
+  - id: 3
+    title: "Create test_agent.py with TestModel-based tests"
+    file: "tests/test_agent.py"
+    action: "create"
+    description: |
+      Create comprehensive tests for the agent using PydanticAI's TestModel.
+
+      Required fixtures in conftest.py (update existing):
+      - mock_deps() — returns AgentDeps with mock config, ProfileManager, HistoryManager, UserProfile
+      - Use MockProfileManager and MockHistoryManager that don't hit the database
+
+      Test cases:
+      1. test_agent_instantiates — Agent has correct deps_type, system_prompt set
+      2. test_agent_has_update_user_note_tool — Tool is registered in agent.tools
+      3. test_update_user_note_modifies_profile — Tool appends note and saves
+      4. test_inject_user_profile_in_system_prompt — Dynamic prompt includes user data
+
+      Use agent.override(model=TestModel()) for all tests.
+      Never call real LLMs in tests.
+    code_snippet: |
+      """Tests for the PydanticAI agent.
+
+      Uses TestModel to avoid calling real LLMs.
+      """
+
+      import pytest
+      from pydantic_ai.models.test import TestModel
+      from unittest.mock import AsyncMock, MagicMock
+
+      from home_agent.agent import agent, AgentDeps
+      from home_agent.profile import UserProfile, MediaPreferences, NotificationPrefs
+
+
+      @pytest.fixture
+      def mock_config() -> MagicMock:
+          """Create a mock AppConfig."""
+          config = MagicMock()
+          config.telegram_bot_token = "test_token"
+          config.openrouter_api_key = "test_key"
+          config.allowed_telegram_ids = [12345]
+          return config
+
+
+      @pytest.fixture
+      def default_test_profile() -> UserProfile:
+          """Create a default user profile for testing."""
+          return UserProfile(
+              name="Test User",
+              media_preferences=MediaPreferences(
+                  preferred_genres=["sci-fi", "action"],
+                  preferred_quality="1080p",
+                  preferred_language="en",
+              ),
+              notification_prefs=NotificationPrefs(),
+              notes=[],
+          )
+
+
+      @pytest.fixture
+      def mock_deps(mock_config: MagicMock, default_test_profile: UserProfile) -> AgentDeps:
+          """Create mock dependencies for agent testing."""
+          profile_manager = AsyncMock()
+          profile_manager.save = AsyncMock()
+          history_manager = AsyncMock()
+          history_manager.save_message = AsyncMock()
+          history_manager.get_history = AsyncMock(return_value=[])
+          return AgentDeps(
+              config=mock_config,
+              profile_manager=profile_manager,
+              history_manager=history_manager,
+              user_profile=default_test_profile,
+          )
+
+
+      @pytest.mark.asyncio
+      async def test_agent_instantiates(mock_deps: AgentDeps) -> None:
+          """Agent instantiates with correct deps_type."""
+          assert agent.deps_type is AgentDeps
+          assert agent.system_prompt is not None
+
+
+      @pytest.mark.asyncio
+      async def test_agent_has_update_user_note_tool(mock_deps: AgentDeps) -> None:
+          """Agent registers update_user_note tool."""
+          m = TestModel()
+          with agent.override(model=m):
+              result = await agent.run("test", deps=mock_deps)
+              assert result.output is not None
+          # Verify tool was registered
+          assert m.last_model_request_parameters is not None
+          tool_names = [
+              t.name for t in m.last_model_request_parameters.function_tools
+          ]
+          assert "update_user_note" in tool_names
+
+
+      @pytest.mark.asyncio
+      async def test_update_user_note_modifies_profile(
+          mock_deps: AgentDeps, default_test_profile: UserProfile
+      ) -> None:
+          """update_user_note tool appends note and saves profile."""
+          note = "User prefers sci-fi movies"
+          tool_result = await agent.tools["update_user_note"].run(
+              {"note": note}, deps=mock_deps
+          )
+          assert "Noted" in tool_result.output
+          mock_deps.profile_manager.save.assert_called_once()
+          saved_profile = mock_deps.profile_manager.save.call_args[0][0]
+          assert note in saved_profile.notes
+
+
+      @pytest.mark.asyncio
+      async def test_inject_user_profile_in_system_prompt(
+          mock_deps: AgentDeps,
+      ) -> None:
+          """Dynamic system prompt includes user profile data."""
+          m = TestModel(custom_output_text="test response")
+          with agent.override(model=m):
+              result = await agent.run("hello", deps=mock_deps)
+              assert result.output == "test response"
+          # Verify the dynamic prompt was called with correct profile data
+          # (implicit via successful run)
+    tests:
+      - "All tests pass with pytest"
+      - "No real LLM calls made (TestModel used throughout)"
+
+  - id: 4
+    title: "Update pyproject.toml import-linter contract for agent module"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Uncomment and update the import-linter contract for the agent module.
+
+      The agent module should not import bot or main (layer separation).
+      Add a contract that forbids home_agent.agent from importing:
+      - home_agent.bot
+      - home_agent.main
+
+      This ensures the agent layer stays independent from the bot and entry point.
+    code_snippet: |
+      [[tool.importlinter.contracts]]
+      name = "agent does not import bot or main"
+      type = "forbidden"
+      source_modules = ["home_agent.agent"]
+      forbidden_modules = [
+          "home_agent.bot",
+          "home_agent.main",
+      ]
+    tests:
+      - "lint-imports passes with no forbidden import errors"
+
+  - id: 5
+    title: "Update conftest.py with shared fixtures"
+    file: "tests/conftest.py"
+    action: "modify"
+    description: |
+      Add shared fixtures to conftest.py that test_agent.py and future tests can use:
+
+      - mock_config() — MagicMock with required AppConfig fields
+      - default_test_profile() — UserProfile with sensible defaults
+      - mock_deps() — AgentDeps with mock profile_manager and history_manager
+
+      These fixtures ensure consistent test data across all agent tests.
+    code_snippet: |
+      """Shared pytest fixtures for home-agent tests."""
+
+      import pytest
+      from unittest.mock import AsyncMock, MagicMock
+
+      from home_agent.agent import AgentDeps
+      from home_agent.profile import UserProfile, MediaPreferences, NotificationPrefs
+
+
+      @pytest.fixture
+      def mock_config() -> MagicMock:
+          """Create a mock AppConfig."""
+          config = MagicMock()
+          config.telegram_bot_token = "test_token"
+          config.openrouter_api_key = "test_key"
+          config.allowed_telegram_ids = [12345]
+          config.jellyseerr_url = "http://localhost:5055"
+          config.jellyseerr_api_key = "test_jellyseerr_key"
+          config.db_path = ":memory:"
+          return config
+
+
+      @pytest.fixture
+      def default_test_profile() -> UserProfile:
+          """Create a default user profile for testing."""
+          return UserProfile(
+              name="Test User",
+              media_preferences=MediaPreferences(
+                  preferred_genres=["sci-fi", "action"],
+                  preferred_quality="1080p",
+                  preferred_language="en",
+                  avoid_genres=[],
+              ),
+              notification_prefs=NotificationPrefs(
+                  enabled=True,
+                  quiet_hours_start=22,
+                  quiet_hours_end=8,
+                  jellyseerr=True,
+                  glances=False,
+              ),
+              notes=[],
+          )
+
+
+      @pytest.fixture
+      def mock_deps(mock_config: MagicMock, default_test_profile: UserProfile) -> AgentDeps:
+          """Create mock dependencies for agent testing."""
+          profile_manager = AsyncMock()
+          profile_manager.save = AsyncMock()
+          profile_manager.get = AsyncMock(return_value=default_test_profile)
+          history_manager = AsyncMock()
+          history_manager.save_message = AsyncMock()
+          history_manager.get_history = AsyncMock(return_value=[])
+          return AgentDeps(
+              config=mock_config,
+              profile_manager=profile_manager,
+              history_manager=history_manager,
+              user_profile=default_test_profile,
+          )
+    tests:
+      - "Fixtures are importable and return correct types"
+      - "mock_deps fixture provides async mocks for save/get methods"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Agent instantiates without error"
+  - "System prompt contains user profile data when provided"
+  - "Profile update tool modifies profile via ProfileManager"
+  - "No real LLM calls in tests (TestModel used)"
+  - "Import linter contract for agent module activated and passing"

@@ -130,7 +130,7 @@ phases:
       - Profile update tool registered on the agent
 
       '
-    status: pending
+    status: done
     test: '- test_agent.py — Agent instantiates without error
 
       - System prompt contains user profile data when provided

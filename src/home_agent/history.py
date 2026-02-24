@@ -80,38 +80,51 @@ def sliding_window_processor(
     def processor(messages: list[ModelMessage]) -> list[ModelMessage]:
         """Trim history to the last N request/response pairs.
 
+        PydanticAI calls this processor on every model step, not just the first.
+        The processor MUST return a non-empty list that ends with a ModelRequest.
+        Any trailing incomplete sequence (i.e. everything after the last complete
+        request/response pair) is always preserved verbatim so as not to violate
+        that contract.
+
         Args:
             messages: Full conversation message list from PydanticAI.
 
         Returns:
-            Reduced list containing only the last N complete pairs.
+            Reduced list containing the last N complete pairs, followed by any
+            trailing messages that do not form a complete pair.
         """
-        # Walk through messages collecting complete (request, response) pairs
+        # Walk forward collecting complete (ModelRequest, ModelResponse) pairs and
+        # tracking any trailing messages that don't form a complete pair.
         pairs: list[tuple[ModelRequest, ModelResponse]] = []
+        tail: list[ModelMessage] = []
         i = 0
         while i < len(messages):
             msg = messages[i]
             if isinstance(msg, ModelRequest):
-                # Look ahead for the paired response
                 next_msg = messages[i + 1] if i + 1 < len(messages) else None
                 if isinstance(next_msg, ModelResponse):
                     pairs.append((msg, next_msg))
                     i += 2
+                    tail = []  # consumed — reset tail
                 else:
-                    # Unpaired request at end — skip it to avoid splitting
-                    i += 1
+                    # Unpaired request — part of the trailing sequence
+                    tail = list(messages[i:])
+                    break
             else:
-                # Unexpected ordering (response without request) — skip
+                # Response without a preceding request in this window — skip
                 i += 1
 
         # Keep only the last n pairs
         kept_pairs = pairs[-n:] if n < len(pairs) else pairs
 
-        # Flatten back to a list of ModelMessage
+        # Flatten pairs back to a list of ModelMessage
         result: list[ModelMessage] = []
         for req, resp in kept_pairs:
             result.append(req)
             result.append(resp)
+
+        # Re-append any trailing messages (current step's in-progress sequence)
+        result.extend(tail)
 
         return result
 
