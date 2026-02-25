@@ -1,0 +1,197 @@
+step: "2.1"
+name: "Simplify UserProfile"
+phase: 2
+goal: "Profile model reflects what's actually used — quality per media type, reply language, confirmation mode."
+
+context:
+  description: |
+    Phase 2 focuses on user experience improvements. Step 2.1 simplifies the UserProfile
+    model by removing dead fields and adding fields actually used by the bot: separate
+    quality settings for movies/series, reply language, and confirmation mode. This is
+    based on the design rationale in docs/LLM/plans/user-experience/ux-profile-and-confirmation.md.
+    
+    The current profile has unused fields (preferred_genres, avoid_genres, preferred_language
+    for media, NotificationPrefs, stats) that should be removed. New fields are needed for
+    the confirmation flow and quality onboarding planned in steps 2.2-2.7.
+  dependencies:
+    - "src/home_agent/profile.py — current UserProfile, MediaPreferences, NotificationPrefs"
+    - "src/home_agent/db.py — save_profile/get_profile use model_dump(mode='json')"
+    - "tests/test_profile.py — existing tests for profile defaults and serialization"
+  references:
+    - "docs/LLM/plans/user-experience/ux-profile-and-confirmation.md — full design rationale"
+    - "docs/LLM/memory.yaml — Phase 1 complete, step 1.9b pending (agent factory + DI refactor)"
+    - "AGENTS.md section 3 — Pydantic BaseModel for all structured data"
+
+tasks:
+  - id: 1
+    title: "Remove dead fields from UserProfile"
+    file: "src/home_agent/profile.py"
+    action: "modify"
+    description: |
+      Remove the following from UserProfile:
+      - preferred_genres and avoid_genres fields (not used by bot)
+      - preferred_language from MediaPreferences (replaced by reply_language at profile level)
+      - NotificationPrefs class entirely (not used)
+      - notification_prefs field from UserProfile
+      - stats field from UserProfile
+      
+      The UserProfile should only contain fields actually used by the bot in Phase 2.
+    code_snippet: |
+      # Remove NotificationPrefs class entirely
+      # Remove MediaPreferences class (or simplify to just quality if needed)
+      
+      class UserProfile(BaseModel):
+          """Complete user profile with preferences.
+          
+          Attributes:
+              user_id: Telegram user ID.
+              name: Display name for the user.
+              created_at: When the profile was first created.
+              updated_at: When the profile was last updated.
+              movie_quality: Preferred movie quality ("4k" or "1080p"), or None if not set.
+              series_quality: Preferred series quality ("4k" or "1080p"), or None if not set.
+              reply_language: Language for bot replies (e.g., "English", "Dutch").
+              confirmation_mode: When to confirm before requesting ("always" or "never").
+              notes: Personal notes or observations about the user.
+          """
+          
+          user_id: int
+          name: str | None = None
+          created_at: datetime
+          updated_at: datetime
+          movie_quality: Literal["4k", "1080p"] | None = None
+          series_quality: Literal["4k", "1080p"] | None = None
+          reply_language: str = "English"
+          confirmation_mode: Literal["always", "never"] = "always"
+          notes: list[str] = []
+    tests:
+      - "Update test_profile.py to remove tests for NotificationPrefs and stats"
+      - "Remove MediaPreferences tests or update for new simplified model"
+
+  - id: 2
+    title: "Add new quality and confirmation fields"
+    file: "src/home_agent/profile.py"
+    action: "modify"
+    description: |
+      Add the following new fields to UserProfile:
+      - movie_quality: Literal["4k", "1080p"] | None = None
+      - series_quality: Literal["4k", "1080p"] | None = None
+      - reply_language: str = "English"
+      - confirmation_mode: Literal["always", "never"] = "always"
+      
+      These support the quality onboarding (step 2.5), confirmation flow (step 2.5),
+      and language auto-detection (step 2.2) features.
+    code_snippet: |
+      from typing import Literal
+      
+      class UserProfile(BaseModel):
+          # ... fields as shown in task 1 ...
+          movie_quality: Literal["4k", "1080p"] | None = None
+          series_quality: Literal["4k", "1080p"] | None = None
+          reply_language: str = "English"
+          confirmation_mode: Literal["always", "never"] = "always"
+    tests:
+      - "Test default values: movie_quality=None, series_quality=None, reply_language='English', confirmation_mode='always'"
+
+  - id: 3
+    title: "Update ProfileManager for migration compatibility"
+    file: "src/home_agent/profile.py"
+    action: "modify"
+    description: |
+      Update ProfileManager.get() to handle existing profiles that may have the old
+      fields (NotificationPrefs, stats, preferred_genres, etc.). Pydantic ignores
+      unknown fields on deserialize, so old data won't break — but we should ensure
+      the new fields have proper defaults when loading old profiles.
+      
+      The migration strategy: Pydantic ignores unknown fields on deserialize, and
+      removed fields will disappear on the next save. No explicit migration needed.
+    code_snippet: |
+      async def get(self, user_id: int) -> UserProfile:
+          """Get or create user profile from the database.
+          
+          Args:
+              user_id: Telegram user ID to retrieve profile for.
+              
+          Returns:
+              User profile from database or newly created default profile.
+              
+          Note:
+              Old profiles with removed fields (notification_prefs, stats, etc.)
+              will have those fields ignored by Pydantic. They will disappear
+              on the next save.
+          """
+          profile_data = await get_profile(self.db_path, user_id=user_id)
+          if profile_data:
+              # Filter out old fields that no longer exist in UserProfile
+              profile_data = {
+                  k: v for k, v in profile_data.items()
+                  if k not in ('notification_prefs', 'stats', 'media_preferences')
+              }
+              # ... rest of existing logic with new field defaults ...
+    tests:
+      - "Test loading a profile with old fields (notification_prefs, stats) doesn't error"
+      - "Test that old fields are not present after save"
+
+  - id: 4
+    title: "Update test_profile.py for new model structure"
+    file: "tests/test_profile.py"
+    action: "modify"
+    description: |
+      Update existing tests to match the new UserProfile structure:
+      1. Remove all NotificationPrefs tests and imports
+      2. Remove all MediaPreferences tests (or simplify if still needed)
+      3. Update test_default_profile_has_sensible_defaults() to check new fields
+      4. Update test_profile_serializes_deserializes_identically() with new fields
+      5. Update test_profile_manager_updates_and_persists_fields() to test quality fields
+      6. Add new test for migration: old profile with removed fields loads without error
+    code_snippet: |
+      def test_default_profile_has_sensible_defaults() -> None:
+          """Newly created default profile has expected default values."""
+          profile = _make_profile()
+          
+          assert profile.movie_quality is None
+          assert profile.series_quality is None
+          assert profile.reply_language == "English"
+          assert profile.confirmation_mode == "always"
+          assert profile.notes == []
+      
+      def test_profile_with_removed_fields_deserializes_without_error() -> None:
+          """Profile with old fields (notification_prefs, stats) loads without error (migration)."""
+          old_profile_data = {
+              "user_id": 42,
+              "name": "Alice",
+              "created_at": datetime(2024, 1, 1),
+              "updated_at": datetime(2024, 6, 1),
+              "notification_prefs": {"enabled": True},  # Old field
+              "stats": {"requests_made": 5},  # Old field
+              "media_preferences": {"preferred_quality": "1080p"},  # Old nested model
+          }
+          # Should not raise — Pydantic ignores unknown fields
+          profile = UserProfile(**old_profile_data)
+          assert profile.user_id == 42
+          assert profile.reply_language == "English"  # Default
+    tests:
+      - "All existing tests pass with new model structure"
+      - "New migration test verifies old profiles load without error"
+
+  - id: 5
+    title: "Update import-linter contract if needed"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Check if pyproject.toml has import-linter contracts that reference the old
+      profile structure. The profile module should not import agent, bot, or main.
+      This should already be satisfied, but verify the contract is still active.
+    tests:
+      - "lint-imports passes with no forbidden imports"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "UserProfile has movie_quality, series_quality, reply_language, confirmation_mode fields"
+  - "NotificationPrefs, MediaPreferences classes removed (or MediaPreferences simplified)"
+  - "Removed fields: preferred_genres, avoid_genres, notification_prefs, stats"
+  - "Default profile has movie_quality=None, series_quality=None, reply_language='English', confirmation_mode='always'"
+  - "Profile with old fields (notification_prefs, stats) deserializes without error"
+  - "Profile round-trips through JSON with new fields intact"
+  - "All tests in test_profile.py pass"

@@ -5,9 +5,9 @@ to handle database interactions via db.py.
 """
 
 import logging
-from datetime import datetime, time
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -17,62 +17,39 @@ logger = logging.getLogger(__name__)
 
 
 class MediaPreferences(BaseModel):
-    """User's media consumption preferences.
+    """User's media download preferences.
 
     Attributes:
-        preferred_genres: List of genres the user likes to watch.
-        preferred_quality: Default quality for media requests (e.g., '1080p', '4k').
-        preferred_language: Preferred audio/subtitle language (e.g., 'en', 'fr').
-        avoid_genres: List of genres the user dislikes.
+        movie_quality: Preferred quality for movie downloads. None means not yet asked.
+        series_quality: Preferred quality for series downloads. None means not yet asked.
     """
 
-    preferred_genres: list[str] = []
-    preferred_quality: str = "1080p"
-    preferred_language: str = "en"
-    avoid_genres: list[str] = []
-
-
-class NotificationPrefs(BaseModel):
-    """User's notification preferences.
-
-    Attributes:
-        enabled: Whether notifications are enabled for this user.
-        quiet_hours_start: Time when notifications should be muted.
-        quiet_hours_end: Time when notifications should resume.
-        notifications_by_source: Dict mapping notification sources to enabled status.
-    """
-
-    enabled: bool = True
-    quiet_hours_start: Optional[time] = None
-    quiet_hours_end: Optional[time] = None
-    notifications_by_source: dict[str, bool] = {
-        "media_requests": True,
-        "system_alerts": True,
-    }
+    movie_quality: Literal["4k", "1080p"] | None = None
+    series_quality: Literal["4k", "1080p"] | None = None
 
 
 class UserProfile(BaseModel):
-    """Complete user profile with preferences, notes, and statistics.
+    """Complete user profile with preferences and notes.
 
     Attributes:
         user_id: Telegram user ID.
         name: Display name for the user.
         created_at: When the profile was first created.
         updated_at: When the profile was last updated.
-        media_preferences: Media consumption preferences.
-        notification_prefs: Notification settings.
+        reply_language: Language the agent uses to reply to this user.
+        confirmation_mode: Whether the agent confirms before requesting media.
+        media_preferences: Media download preferences.
         notes: Personal notes or observations about the user.
-        stats: Usage statistics.
     """
 
     user_id: int
-    name: Optional[str] = None
+    name: str | None = None
     created_at: datetime
     updated_at: datetime
+    reply_language: str = "english"
+    confirmation_mode: Literal["always", "never"] = "always"
     media_preferences: MediaPreferences = MediaPreferences()
-    notification_prefs: NotificationPrefs = NotificationPrefs()
     notes: list[str] = []
-    stats: dict[str, int] = {"requests_made": 0, "downloads_completed": 0}
 
 
 class ProfileManager:
@@ -90,7 +67,7 @@ class ProfileManager:
         self,
         db_path: str | Path,
         *,
-        default_profile: Optional[UserProfile] = None,
+        default_profile: UserProfile | None = None,
     ) -> None:
         """Initialize the ProfileManager with database path and default profile.
 
@@ -109,14 +86,12 @@ class ProfileManager:
         """
         now = datetime.now()
         return UserProfile(
-            user_id=0,  # Placeholder ID that will be replaced
+            user_id=0,
             name=None,
             created_at=now,
             updated_at=now,
             media_preferences=MediaPreferences(),
-            notification_prefs=NotificationPrefs(),
             notes=[],
-            stats={"requests_made": 0, "downloads_completed": 0},
         )
 
     async def get(self, user_id: int) -> UserProfile:
@@ -145,17 +120,6 @@ class ProfileManager:
                     "media_preferences", MediaPreferences()
                 )
 
-            if "notification_prefs" in profile_dict and isinstance(
-                profile_dict["notification_prefs"], dict
-            ):
-                profile_dict["notification_prefs"] = NotificationPrefs(
-                    **profile_dict["notification_prefs"]
-                )
-            else:
-                profile_dict.setdefault(
-                    "notification_prefs", NotificationPrefs()
-                )
-
             # Ensure datetime fields are present
             if "created_at" not in profile_dict:
                 profile_dict["created_at"] = datetime.now()
@@ -180,7 +144,7 @@ class ProfileManager:
             profile: User profile to save to database.
         """
         profile = profile.model_copy(update={"updated_at": datetime.now()})
-        # Use mode="json" so datetime/time objects are serialised to ISO strings
+        # Use mode="json" so datetime objects are serialised to ISO strings
         profile_data = profile.model_dump(mode="json")
         # Remove user_id — it's stored as the DB key, not in the data blob
         profile_data.pop("user_id", None)

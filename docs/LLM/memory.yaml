@@ -4,25 +4,26 @@
 # Updated after each completed step by autodev.
 
 project: home-agent
-last_updated: "2026-02-25"
+last_updated: "2026-02-26"
 
 current_state:
-  phase: 1
-  step: "1.10"
-  name: "Docker Deployment"
+  phase: 2
+  step: "2.1"
+  name: "Simplify UserProfile"
   status: "complete"
-  next_step: "1.9b — Wire MCP Toolsets into Agent (pending), then 2.1 — Find or Build Glances MCP Server"
-  description: "Phase 1 — Steps 1.1–1.10 complete (1.9b still pending — agent factory + DI refactor). Bot fully working end-to-end: Telegram → Agent → Jellyseerr MCP → reply. Docker deployment with multi-stage Dockerfile, docker-compose.yml orchestrating home-agent + jellyseerr-mcp. Many Docker/MCP networking issues resolved during step 1.10 (see lessons_learned)."
+  next_step: "2.2 — Auto-detect Reply Language"
+  description: "Phase 2 started. Step 2.1 complete — UserProfile simplified: removed dead fields (NotificationPrefs, stats, preferred_genres, avoid_genres, preferred_language), added movie_quality/series_quality split, reply_language, confirmation_mode. Dynamic system prompt updated in agent.py. Migration handled via Pydantic v2 default extra='ignore' behavior."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
     - "Message save/retrieve and profile save/retrieve functions"
-    - "Pydantic user profile models (UserProfile, MediaPreferences, NotificationPrefs)"
+    - "Pydantic user profile models (UserProfile, MediaPreferences) — simplified with movie_quality, series_quality, reply_language, confirmation_mode"
     - "ProfileManager with async get/save and automatic default profile creation"
     - "HistoryManager wrapping db.py for conversation history CRUD"
     - "sliding_window_processor for PydanticAI history_processors (last N pairs)"
     - "Telegram bot with whitelist enforcement and typing indicator"
     - "PydanticAI agent with AgentDeps, dynamic system prompt, update_user_note tool"
+    - "Dynamic system prompt injects movie_quality, series_quality (or 'NOT SET'), reply_language, confirmation_mode"
     - "bot.py wired to call agent and persist conversation history"
     - "Jellyseerr community MCP server deployed via Docker Compose (deployment/docker-compose.yml)"
     - "MCPRegistry with register(), get_toolsets(), get_tool_names() — creates FastMCPToolset instances for enabled servers"
@@ -42,6 +43,7 @@ current_state:
     - "patched main.py volume-mounted into jellyseerr-mcp container — disables DNS rebinding protection and binds to 0.0.0.0"
     - "PYTHONPATH=/app/src in Dockerfile runtime stage — required because uv installs as editable"
     - "Compose run command: docker compose -f deployment/docker-compose.yml --env-file .env up -d"
+    - "Old profiles with removed fields (NotificationPrefs, stats, old MediaPreferences) migrate seamlessly on next load/save"
   known_issues: []
 
 completed_steps:
@@ -153,6 +155,16 @@ completed_steps:
       - "get_agent_toolsets() added to agent.py (not main.py) to keep MCP toolset logic close to the agent — agent.py is allowed to import from mcp per import-linter contracts"
       - "Integration tests mock home_agent.bot.agent (import location) not home_agent.agent.agent (definition location)"
       - "MCPRegistry created in main.py but toolsets not yet passed to agent — agent uses async with agent: for lifecycle, toolsets are a future wiring concern"
+    issues: []
+
+  - step: "2.1"
+    name: "Simplify UserProfile"
+    date: "2026-02-26"
+    summary: "Simplified UserProfile and MediaPreferences models. Removed dead fields (NotificationPrefs, stats, preferred_genres, avoid_genres, preferred_language). Added movie_quality/series_quality (Literal['4k', '1080p'] | None), reply_language (str, default 'english'), confirmation_mode (Literal['always', 'never'], default 'always'). Updated dynamic system prompt in agent.py to inject new fields. Migration handled by Pydantic v2 ignoring unknown fields on deserialization."
+    decisions:
+      - "No explicit ConfigDict(extra='ignore') needed — Pydantic v2 ignores extra fields by default"
+      - "agent.py dynamic prompt updated in this step (not deferred to 2.5) because old field references would have broken"
+      - "confirmation_mode uses only 'always' and 'never' — 'smart' rejected per plan sparring as YAGNI"
     issues: []
 
   - step: "1.10"

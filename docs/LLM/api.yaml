@@ -84,17 +84,12 @@ modules:
       - name: "MediaPreferences"
         type: "class"
         signature: "BaseModel"
-        description: "Genre, quality, and language preferences for media consumption."
-
-      - name: "NotificationPrefs"
-        type: "class"
-        signature: "BaseModel"
-        description: "Notification settings including enabled flag, quiet hours, and per-source toggles."
+        description: "User's media download preferences. Fields: movie_quality (Literal['4k', '1080p'] | None), series_quality (Literal['4k', '1080p'] | None). None means not yet asked."
 
       - name: "UserProfile"
         type: "class"
         signature: "BaseModel"
-        description: "Complete user profile with preferences, notes, statistics, and personal details."
+        description: "Complete user profile with preferences and notes. Fields: user_id, name, created_at, updated_at, reply_language (str, default 'english'), confirmation_mode (Literal['always', 'never'], default 'always'), media_preferences (MediaPreferences), notes (list[str])."
 
       - name: "ProfileManager"
         type: "class"

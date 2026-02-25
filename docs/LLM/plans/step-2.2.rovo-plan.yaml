@@ -1,0 +1,251 @@
+step: "2.2"
+name: "Auto-detect Reply Language"
+phase: 2
+goal: "New users get their reply language auto-detected from Telegram locale."
+
+context:
+  description: |
+    Step 2.2 adds automatic reply language detection for new users based on their
+    Telegram locale (language_code). When a new user interacts with the bot for the
+    first time, their profile is created with reply_language set based on the
+    language_code from update.effective_user.language_code.
+    
+    This is an UX improvement — users don't need to manually set their language.
+    The set_reply_language tool (step 2.4) remains as an escape hatch if auto-detection
+    is wrong (e.g., Telegram app language != chat language).
+    
+    Per implementation.yaml notes: "Telegram language_code is app language, not chat
+    language — acceptable because set_reply_language tool is the escape hatch."
+  dependencies:
+    - "src/home_agent/bot.py — message handler where update.effective_user.language_code is available"
+    - "src/home_agent/profile.py — ProfileManager.get_or_create_profile() needs language_code parameter"
+    - "tests/test_bot.py — tests for language auto-detection"
+    - "tests/test_profile.py — tests for ProfileManager with language_code parameter"
+  references:
+    - "docs/LLM/implementation.yaml step 2.2 — scope and test criteria"
+    - "AGENTS.md section 1 — separation of concerns (bot.py handles Telegram wiring)"
+    - "python-telegram-bot docs — update.effective_user.language_code"
+
+tasks:
+  - id: 1
+    title: "Add language_code parameter to ProfileManager.get()"
+    file: "src/home_agent/profile.py"
+    action: "modify"
+    description: |
+      Update ProfileManager.get() to accept an optional language_code parameter.
+      When provided and the profile is newly created, set reply_language based on
+      the language_code mapping.
+      
+      Add a helper method _map_language_code() that converts Telegram language_code
+      to full language name:
+      - nl → "Dutch"
+      - en → "English"
+      - fr → "French"
+      - de → "German"
+      - fallback → "English"
+    code_snippet: |
+      async def get(self, user_id: int, *, language_code: str | None = None) -> UserProfile:
+          """Get or create user profile from the database.
+          
+          Args:
+              user_id: Telegram user ID to retrieve profile for.
+              language_code: Optional Telegram language code for auto-detecting reply_language.
+                  Only used when creating a new profile.
+          
+          Returns:
+              User profile from database or newly created default profile.
+          """
+          profile_data = await get_profile(self.db_path, user_id=user_id)
+          if profile_data:
+              # ... existing logic ...
+              return UserProfile(**profile_dict)
+          
+          # Create default profile for new user
+          logger.info("Creating default profile for user %s", user_id)
+          now = datetime.now()
+          
+          # Auto-detect reply language from Telegram locale
+          reply_language = self._map_language_code(language_code) if language_code else "English"
+          
+          new_profile = self.default_profile.model_copy(
+              update={
+                  "user_id": user_id,
+                  "created_at": now,
+                  "updated_at": now,
+                  "reply_language": reply_language,
+              }
+          )
+          await self.save(new_profile)
+          return new_profile
+      
+      def _map_language_code(self, language_code: str) -> str:
+          """Map Telegram language_code to full language name.
+          
+          Args:
+              language_code: Two-letter language code from Telegram (e.g., 'nl', 'en').
+          
+          Returns:
+              Full language name (e.g., 'Dutch', 'English').
+          """
+          mapping = {
+              "nl": "Dutch",
+              "en": "English",
+              "fr": "French",
+              "de": "German",
+          }
+          return mapping.get(language_code, "English")
+    tests:
+      - "test_profile.py — ProfileManager.get() with language_code='nl' creates profile with reply_language='Dutch'"
+      - "test_profile.py — ProfileManager.get() with language_code=None creates profile with reply_language='English'"
+      - "test_profile.py — Existing user profile is not overwritten on subsequent calls"
+
+  - id: 2
+    title: "Pass language_code from bot.py to ProfileManager.get()"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      In make_message_handler(), extract language_code from update.effective_user.language_code
+      and pass it to profile_manager.get() when loading the user profile.
+      
+      The language_code is only used for new profile creation — existing profiles keep
+      their stored reply_language.
+    code_snippet: |
+      async def handle_message(
+          update: Update, context: ContextTypes.DEFAULT_TYPE
+      ) -> None:
+          # ... existing whitelist and typing indicator code ...
+          
+          # Load user profile with auto-detected language for new users
+          language_code = update.effective_user.language_code if update.effective_user else None
+          user_profile = await profile_manager.get(user_id, language_code=language_code)
+          
+          # ... rest of existing code ...
+    tests:
+      - "test_bot.py — New user with language_code='nl' gets profile with reply_language='Dutch'"
+      - "test_bot.py — New user with language_code=None gets reply_language='English'"
+
+  - id: 3
+    title: "Update test_profile.py for language_code parameter"
+    file: "tests/test_profile.py"
+    action: "modify"
+    description: |
+      Add tests for the new language_code parameter on ProfileManager.get():
+      1. Test auto-detection for supported languages (nl, en, fr, de)
+      2. Test fallback to English for unsupported languages
+      3. Test that existing profiles are not overwritten
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_profile_manager_auto_detects_language_dutch(
+          test_db: Path,
+      ) -> None:
+          """ProfileManager creates profile with reply_language='Dutch' for language_code='nl'."""
+          manager = ProfileManager(test_db)
+          
+          profile = await manager.get(100, language_code="nl")
+          
+          assert profile.reply_language == "Dutch"
+      
+      @pytest.mark.asyncio
+      async def test_profile_manager_auto_detects_language_english_fallback(
+          test_db: Path,
+      ) -> None:
+          """ProfileManager creates profile with reply_language='English' for unknown language_code."""
+          manager = ProfileManager(test_db)
+          
+          profile = await manager.get(100, language_code="zh")  # Chinese not in mapping
+          
+          assert profile.reply_language == "English"
+      
+      @pytest.mark.asyncio
+      async def test_profile_manager_does_not_overwrite_existing_language(
+          test_db: Path,
+      ) -> None:
+          """Existing profile reply_language is not overwritten on subsequent get() calls."""
+          manager = ProfileManager(test_db)
+          
+          # Create profile with Dutch
+          profile = await manager.get(200, language_code="nl")
+          assert profile.reply_language == "Dutch"
+          
+          # Simulate subsequent message with different language_code (should not change)
+          profile2 = await manager.get(200, language_code="fr")
+          assert profile2.reply_language == "Dutch"  # Still Dutch
+    tests:
+      - "All new language detection tests pass"
+      - "Existing profile tests still pass"
+
+  - id: 4
+    title: "Update test_bot.py for language auto-detection"
+    file: "tests/test_bot.py"
+    action: "modify"
+    description: |
+      Add tests verifying that bot.py passes language_code to ProfileManager.get():
+      1. Test that new user with language_code='nl' gets Dutch profile
+      2. Test that new user with None language_code gets English profile
+      3. Test that existing user profile language is not overwritten
+      
+      Use MagicMock to spy on ProfileManager.get() calls or verify via profile data.
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_new_user_language_auto_detected_dutch(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """New user with language_code='nl' gets profile with reply_language='Dutch'."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          
+          mock_result = MagicMock()
+          mock_result.output = "Hallo!"
+          
+          mock_agent = MagicMock()
+          mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+          mock_agent.__aexit__ = AsyncMock(return_value=False)
+          mock_agent.run = AsyncMock(return_value=mock_result)
+          
+          handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+          update = make_test_update("hallo", user_id=123)
+          update.effective_user.language_code = "nl"  # Set Dutch locale
+          
+          await handler(update, MagicMock())
+          
+          # Verify profile was created with Dutch
+          profile = await profile_manager.get(123)
+          assert profile.reply_language == "Dutch"
+      
+      @pytest.mark.asyncio
+      async def test_new_user_language_fallback_to_english(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """New user with language_code=None gets profile with reply_language='English'."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          
+          mock_result = MagicMock()
+          mock_result.output = "Hello!"
+          
+          mock_agent = MagicMock()
+          mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+          mock_agent.__aexit__ = AsyncMock(return_value=False)
+          mock_agent.run = AsyncMock(return_value=mock_result)
+          
+          handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+          update = make_test_update("hello", user_id=456)
+          update.effective_user.language_code = None  # No locale set
+          
+          await handler(update, MagicMock())
+          
+          profile = await profile_manager.get(456)
+          assert profile.reply_language == "English"
+    tests:
+      - "All new bot language detection tests pass"
+      - "Existing bot tests still pass"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "ProfileManager.get() accepts optional language_code parameter"
+  - "ProfileManager._map_language_code() maps nl→Dutch, en→English, fr→French, de→German, fallback→English"
+  - "bot.py passes update.effective_user.language_code to profile_manager.get()"
+  - "New user with language_code='nl' gets profile with reply_language='Dutch'"
+  - "New user with language_code=None gets profile with reply_language='English'"
+  - "Existing user profile reply_language is not overwritten on subsequent messages"

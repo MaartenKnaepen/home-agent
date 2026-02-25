@@ -300,7 +300,7 @@ phases:
       \n- Add confirmation_mode: Literal[\"always\", \"never\"] = \"always\"\n- Migration:\
       \ Pydantic ignores unknown fields on deserialize, removed fields disappear on\
       \ next save\n"
-    status: pending
+    status: done
     test: '- test_profile.py — Default profile has movie_quality=None, series_quality=None,
       reply_language="english", confirmation_mode="always"
 
