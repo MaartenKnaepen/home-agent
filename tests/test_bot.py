@@ -6,7 +6,7 @@ Covers whitelist enforcement, typing indicator, and agent response behaviour.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram import Chat, Message, Update, User
@@ -69,14 +69,14 @@ async def test_authorized_user_gets_agent_response(
     mock_result = MagicMock()
     mock_result.output = "Agent response"
 
-    with patch("home_agent.bot.agent") as mock_agent:
-        mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
-        mock_agent.__aexit__ = AsyncMock(return_value=False)
-        mock_agent.run = AsyncMock(return_value=mock_result)
+    mock_agent = MagicMock()
+    mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+    mock_agent.__aexit__ = AsyncMock(return_value=False)
+    mock_agent.run = AsyncMock(return_value=mock_result)
 
-        handler = make_message_handler(mock_config, profile_manager, history_manager)
-        update = make_test_update("hello", user_id=123)
-        await handler(update, MagicMock())
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    update = make_test_update("hello", user_id=123)
+    await handler(update, MagicMock())
 
     update.message.reply_text.assert_called_once_with("Agent response")
 
@@ -92,7 +92,8 @@ async def test_unauthorized_user_gets_rejection(
     update = make_test_update("hello", user_id=99999)
     context = MagicMock()
 
-    handler = make_message_handler(mock_config, profile_manager, history_manager)
+    mock_agent = MagicMock()
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
     await handler(update, context)
 
     update.message.reply_text.assert_called_once()
@@ -115,14 +116,14 @@ async def test_typing_action_sent_before_response(
     mock_result = MagicMock()
     mock_result.output = "pong"
 
-    with patch("home_agent.bot.agent") as mock_agent:
-        mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
-        mock_agent.__aexit__ = AsyncMock(return_value=False)
-        mock_agent.run = AsyncMock(return_value=mock_result)
+    mock_agent = MagicMock()
+    mock_agent.__aenter__ = AsyncMock(return_value=mock_agent)
+    mock_agent.__aexit__ = AsyncMock(return_value=False)
+    mock_agent.run = AsyncMock(return_value=mock_result)
 
-        handler = make_message_handler(mock_config, profile_manager, history_manager)
-        update = make_test_update("ping", user_id=456)
-        await handler(update, MagicMock())
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    update = make_test_update("ping", user_id=456)
+    await handler(update, MagicMock())
 
     update.effective_chat.send_action.assert_called_once_with(action=ChatAction.TYPING)
     update.message.reply_text.assert_called_once()

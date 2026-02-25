@@ -20,6 +20,8 @@ class AppConfig(BaseSettings):
         allowed_telegram_ids: Authorized Telegram user IDs.
         db_path: Path to SQLite database file.
         log_level: Logging level.
+        llm_model: PydanticAI model string (e.g. openrouter:qwen/qwq-32b:free).
+        mcp_port: Port number for the MCP server HTTP endpoint.
     """
 
     telegram_bot_token: SecretStr
@@ -29,6 +31,8 @@ class AppConfig(BaseSettings):
     allowed_telegram_ids: list[int]
     db_path: Path = Field(default=Path("data/home_agent.db"))
     log_level: str = "INFO"
+    llm_model: str = "openrouter:qwen/qwq-32b:free"
+    mcp_port: int = 5056
 
     model_config = SettingsConfigDict(
         env_file=".env",

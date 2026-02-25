@@ -216,3 +216,5 @@ docs/LLM/configs/rovodev-opus.yml
 docs/LLM/configs/rovodev-opus.yml.lock
 docs/LLM/configs/rovodev-sonnet.yml
 docs/LLM/configs/rovodev-sonnet.yml.lock
+.env.example
+.env.example

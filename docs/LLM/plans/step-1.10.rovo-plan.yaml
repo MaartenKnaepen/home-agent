@@ -1,0 +1,516 @@
+step: "1.10"
+name: "Docker Deployment"
+phase: 1
+goal: "Single-command deployment on home server."
+
+context:
+  description: |
+    Step 1.10 creates Docker deployment files for the home-agent application.
+    This enables one-command deployment on a home server with persistent storage
+    and automatic restart.
+
+    Current state:
+    - deployment/docker-compose.yml exists but only contains Jellyseerr MCP server
+    - No Dockerfile exists for the home-agent Python application
+    - .env.example has all required configuration
+    - SQLite database stored in data/home_agent.db (needs volume persistence)
+
+    Required deliverables:
+    1. Dockerfile — Multi-stage build for home-agent Python app
+    2. docker-compose.yml — Combined orchestration for bot + Jellyseerr MCP
+    3. .dockerignore — Exclude unnecessary files from build context
+    4. Updated README.md — Docker deployment instructions
+
+    The Docker setup should:
+    - Use multi-stage build (build stage + runtime stage)
+    - Use uv for dependency management (consistent with local dev)
+    - Persist SQLite database via volume
+    - Load environment variables from .env file
+    - Include health check for the bot
+    - Restart automatically on failure
+    - Network with Jellyseerr MCP container
+  dependencies:
+    - "pyproject.toml — Python dependencies for installation"
+    - "src/home_agent/ — Application source code"
+    - ".env.example — Environment variable template"
+  references:
+    - "AGENTS.md — File Organization Reference (p.10)"
+    - "deployment/docker-compose.yml — Existing Jellyseerr MCP configuration"
+    - "https://docs.astral.sh/uv/guides/integration/docker/ — uv Docker best practices"
+
+tasks:
+  - id: 1
+    title: "Create .dockerignore file"
+    file: ".dockerignore"
+    action: "create"
+    description: |
+      Create a .dockerignore file to exclude unnecessary files from the Docker
+      build context, reducing build time and image size.
+
+      Exclude:
+      - Git files (.git, .gitignore)
+      - Python cache (__pycache__, *.pyc, *.pyo)
+      - Virtual environments (.venv)
+      - Test files (tests/)
+      - Documentation (docs/)
+      - IDE files (.idea, .vscode, *.swp)
+      - Qwen/Rovo config (.qwen, .rovodev)
+      - Import linter cache (.import_linter_cache)
+      - Pytest cache (.pytest_cache)
+    code_snippet: |
+      # Git
+      .git
+      .gitignore
+
+      # Python
+      __pycache__/
+      *.py[cod]
+      *$py.class
+      *.so
+      .venv/
+      venv/
+
+      # Build
+      dist/
+      build/
+      *.egg-info/
+
+      # Tests and docs
+      tests/
+      docs/
+      .pytest_cache/
+      .coverage
+      htmlcov/
+
+      # IDE
+      .idea/
+      .vscode/
+      *.swp
+      *.swo
+
+      # Project specific
+      .qwen/
+      .rovodev/
+      .import_linter_cache/
+      data/
+      *.db
+
+      # Docker
+      Dockerfile
+      docker-compose.yml
+      .dockerignore
+    tests:
+      - ".dockerignore exists and contains valid patterns"
+      - "Excludes tests/, docs/, .venv/, __pycache__/"
+
+  - id: 2
+    title: "Create Dockerfile with multi-stage build"
+    file: "Dockerfile"
+    action: "create"
+    description: |
+      Create a multi-stage Dockerfile for the home-agent application.
+
+      Stage 1 (build):
+      - Use Python 3.12 slim base image
+      - Install uv
+      - Copy pyproject.toml and uv.lock
+      - Install dependencies into a virtual environment
+
+      Stage 2 (runtime):
+      - Use Python 3.12 slim base image
+      - Copy virtual environment from build stage
+      - Copy application source code
+      - Set working directory
+      - Configure environment variables
+      - Set entry point to run main.py
+
+      The Dockerfile should:
+      - Use non-root user for security
+      - Create data directory for SQLite persistence
+      - Set PYTHONUNBUFFERED for proper logging
+      - Include health check (optional, via docker-compose)
+    code_snippet: |
+      # syntax=docker/dockerfile:1
+
+      # Stage 1: Build dependencies
+      FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+
+      WORKDIR /app
+
+      # Enable bytecode compilation for faster startup
+      ENV UV_COMPILE_BYTECODE=1
+
+      # Install dependencies
+      COPY pyproject.toml uv.lock ./
+      RUN uv sync --frozen --no-install-project --no-dev
+
+      # Copy project source
+      COPY src/ ./src/
+
+      # Stage 2: Runtime
+      FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS runtime
+
+      WORKDIR /app
+
+      # Set environment variables
+      ENV PYTHONUNBUFFERED=1
+      ENV PYTHONDONTWRITEBYTECODE=1
+      ENV PATH="/app/.venv/bin:$PATH"
+
+      # Create non-root user for security
+      RUN useradd --create-home --shell /bin/bash appuser
+      RUN mkdir -p /app/data && chown -R appuser:appuser /app
+
+      # Copy virtual environment from build stage
+      COPY --from=build --chown=appuser:appuser /app/.venv /app/.venv
+
+      # Copy application source
+      COPY --chown=appuser:appuser src/ ./src/
+      COPY --chown=appuser:appuser main.py ./
+
+      # Switch to non-root user
+      USER appuser
+
+      # Health check (checks if process is running)
+      HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+          CMD pgrep -f "python.*main.py" || exit 1
+
+      # Run the application
+      CMD ["python", "main.py"]
+    tests:
+      - "docker build -t home-agent . succeeds"
+      - "Image has multi-stage build (build and runtime stages)"
+      - "Container runs as non-root user"
+      - "Health check is configured"
+
+  - id: 3
+    title: "Create docker-compose.yml for home-agent application"
+    file: "docker-compose.yml"
+    action: "create"
+    description: |
+      Create the main docker-compose.yml that orchestrates both the home-agent
+      bot and the Jellyseerr MCP server.
+
+      This file combines:
+      - home-agent service (the Python bot from Dockerfile)
+      - jellyseerr-mcp service (from deployment/docker-compose.yml)
+
+      Configuration:
+      - Load .env file for environment variables
+      - Persist SQLite database via volume
+      - Set restart policy to unless-stopped
+      - Network both services together
+      - Expose no ports (bot communicates via Telegram API)
+    code_snippet: |
+      services:
+        home-agent:
+          build:
+            context: .
+            dockerfile: Dockerfile
+          container_name: home-agent
+          env_file:
+            - .env
+          volumes:
+            - home-agent-data:/app/data
+          restart: unless-stopped
+          depends_on:
+            jellyseerr-mcp:
+              condition: service_healthy
+          networks:
+            - home-agent-network
+
+        jellyseerr-mcp:
+          image: ghcr.io/aserper/jellyseerr-mcp:latest
+          container_name: jellyseerr-mcp
+          environment:
+            - JELLYSEERR_URL=${JELLYSEERR_URL:-http://host.docker.internal:5055}
+            - JELLYSEERR_API_KEY=${JELLYSEERR_API_KEY}
+            - PORT=${MCP_PORT:-5056}
+          ports:
+            - "${MCP_PORT:-5056}:${MCP_PORT:-5056}"
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:5056/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 10s
+          networks:
+            - home-agent-network
+          extra_hosts:
+            - "host.docker.internal:host-gateway"
+
+      volumes:
+        home-agent-data:
+          name: home-agent-data
+
+      networks:
+        home-agent-network:
+          name: home-agent-network
+    tests:
+      - "docker compose config validates successfully"
+      - "home-agent service builds from Dockerfile"
+      - "jellyseerr-mcp service uses community image"
+      - "Volume home-agent-data is defined for persistence"
+      - "Network home-agent-network connects both services"
+      - "Health check on jellyseerr-mcp is configured"
+      - "depends_on ensures MCP starts before bot"
+
+  - id: 4
+    title: "Update .env.example for Docker deployment"
+    file: ".env.example"
+    action: "modify"
+    description: |
+      Update .env.example with Docker-specific notes and ensure all required
+      environment variables are documented.
+
+      Add comments explaining:
+      - JELLYSEERR_URL should use Docker network name when running in compose
+      - DB_PATH is inside container, volume persists it
+      - How to generate TELEGRAM_BOT_TOKEN
+      - How to get OPENROUTER_API_KEY
+    code_snippet: |
+      # Telegram Bot Token (from @BotFather)
+      # 1. Open Telegram and search for @BotFather
+      # 2. Send /newbot and follow instructions
+      # 3. Copy the token provided
+      TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+
+      # OpenRouter API Key for LLM
+      # Get your key from https://openrouter.ai/keys
+      OPENROUTER_API_KEY=sk-or-v1-...
+
+      # JSON array of authorized Telegram User IDs
+      # Find your user ID by messaging @userinfobot on Telegram
+      ALLOWED_TELEGRAM_IDS=[123456789]
+
+      # Jellyseerr Configuration (for MCP server)
+      # When running with Docker Compose, use the Docker network:
+      # JELLYSEERR_URL=http://jellyseerr:5055
+      # For external Jellyseerr, use the actual URL:
+      JELLYSEERR_URL=http://host.docker.internal:5055
+      JELLYSEERR_API_KEY=your-jellyseerr-api-key
+
+      # MCP Server port (Jellyseerr MCP sidecar)
+      MCP_PORT=5056
+
+      # Database Path (inside container)
+      # This is persisted via the home-agent-data volume
+      DB_PATH=/app/data/home_agent.db
+
+      # Logging level (DEBUG, INFO, WARNING, ERROR)
+      LOG_LEVEL=INFO
+    tests:
+      - ".env.example contains all required variables"
+      - "Comments explain Docker networking for JELLYSEERR_URL"
+      - "DB_PATH uses container path /app/data/home_agent.db"
+
+  - id: 5
+    title: "Update README.md with Docker deployment instructions"
+    file: "README.md"
+    action: "modify"
+    description: |
+      Add a Docker Deployment section to README.md with clear instructions
+      for deploying the home-agent application.
+
+      Include:
+      - Prerequisites (Docker, Docker Compose)
+      - Quick start commands
+      - Configuration steps
+      - Verification steps
+      - Troubleshooting tips
+    code_snippet: |
+      ## Docker Deployment
+
+      ### Prerequisites
+
+      - Docker 20.10+
+      - Docker Compose 2.0+
+
+      ### Quick Start
+
+      1. **Clone and configure:**
+         ```bash
+         git clone <repository-url>
+         cd home-agent
+         cp .env.example .env
+         # Edit .env with your configuration
+         ```
+
+      2. **Start the services:**
+         ```bash
+         docker compose up -d
+         ```
+
+      3. **Verify deployment:**
+         ```bash
+         docker compose ps
+         docker compose logs -f home-agent
+         ```
+
+      ### Configuration
+
+      Edit `.env` with your settings:
+
+      | Variable | Description | Example |
+      |----------|-------------|---------|
+      | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather | `123456:ABC-...` |
+      | `OPENROUTER_API_KEY` | OpenRouter API key | `sk-or-v1-...` |
+      | `ALLOWED_TELEGRAM_IDS` | Authorized user IDs | `[123456789]` |
+      | `JELLYSEERR_URL` | Jellyseerr instance URL | `http://jellyseerr:5055` |
+      | `JELLYSEERR_API_KEY` | Jellyseerr API key | `your-api-key` |
+      | `MCP_PORT` | MCP server port | `5056` |
+      | `LOG_LEVEL` | Logging verbosity | `INFO` |
+
+      ### Persistence
+
+      Data is stored in a Docker volume:
+      ```bash
+      docker volume ls | grep home-agent-data
+      ```
+
+      To backup:
+      ```bash
+      docker run --rm -v home-agent-data:/data -v $(pwd):/backup alpine tar czf /backup/home-agent-backup.tar.gz -C /data .
+      ```
+
+      ### Troubleshooting
+
+      **Bot doesn't respond:**
+      - Check logs: `docker compose logs home-agent`
+      - Verify TELEGRAM_BOT_TOKEN is correct
+      - Ensure your user ID is in ALLOWED_TELEGRAM_IDS
+
+      **Cannot connect to Jellyseerr:**
+      - If Jellyseerr runs on the same host, add to docker-compose.yml:
+        ```yaml
+        extra_hosts:
+          - "host.docker.internal:host-gateway"
+        ```
+      - Verify JELLYSEERR_URL and JELLYSEERR_API_KEY
+
+      **Database errors:**
+      - Check volume permissions: `docker volume inspect home-agent-data`
+      - Ensure DB_PATH is `/app/data/home_agent.db` (container path)
+    tests:
+      - "README.md contains Docker Deployment section"
+      - "Quick start commands are copy-paste ready"
+      - "Configuration table documents all variables"
+
+  - id: 6
+    title: "Create tests/test_docker.py (optional smoke test)"
+    file: "tests/test_docker.py"
+    action: "create"
+    description: |
+      Create a simple smoke test that can verify Docker build configuration.
+      This test doesn't run Docker but validates the Dockerfile exists and
+      docker-compose.yml is valid YAML.
+
+      Note: Full Docker integration tests would require Docker daemon access
+      and are typically run in CI/CD, not unit tests.
+    code_snippet: |
+      """Smoke tests for Docker deployment configuration."""
+
+      import os
+      from pathlib import Path
+
+      import yaml
+
+
+      def test_dockerfile_exists() -> None:
+          """Dockerfile exists in project root."""
+          dockerfile = Path("Dockerfile")
+          assert dockerfile.exists(), "Dockerfile not found in project root"
+
+
+      def test_docker_compose_exists() -> None:
+          """docker-compose.yml exists and is valid YAML."""
+          compose_file = Path("docker-compose.yml")
+          assert compose_file.exists(), "docker-compose.yml not found"
+
+          with open(compose_file) as f:
+              config = yaml.safe_load(f)
+
+          assert "services" in config
+          assert "home-agent" in config["services"]
+          assert "jellyseerr-mcp" in config["services"]
+
+
+      def test_docker_compose_has_volume() -> None:
+          """docker-compose.yml defines persistent volume."""
+          compose_file = Path("docker-compose.yml")
+          with open(compose_file) as f:
+              config = yaml.safe_load(f)
+
+          assert "volumes" in config
+          assert "home-agent-data" in config["volumes"]
+
+
+      def test_docker_compose_has_healthcheck() -> None:
+          """docker-compose.yml has health check for jellyseerr-mcp."""
+          compose_file = Path("docker-compose.yml")
+          with open(compose_file) as f:
+              config = yaml.safe_load(f)
+
+          jellyseerr = config["services"]["jellyseerr-mcp"]
+          assert "healthcheck" in jellyseerr
+    tests:
+      - "test_dockerfile_exists passes"
+      - "test_docker_compose_exists passes"
+      - "test_docker_compose_has_volume passes"
+      - "test_docker_compose_has_healthcheck passes"
+
+  - id: 7
+    title: "Verify Docker build and deployment"
+    file: "N/A"
+    action: "verify"
+    description: |
+      Manual verification steps to ensure Docker deployment works:
+
+      1. Build the image:
+         ```bash
+         docker compose build
+         ```
+
+      2. Start services:
+         ```bash
+         docker compose up -d
+         ```
+
+      3. Check status:
+         ```bash
+         docker compose ps
+         ```
+
+      4. View logs:
+         ```bash
+         docker compose logs -f home-agent
+         docker compose logs -f jellyseerr-mcp
+         ```
+
+      5. Test bot via Telegram (send a message)
+
+      6. Stop services:
+         ```bash
+         docker compose down
+         ```
+
+      Note: This is a manual verification task, not automated code.
+    tests:
+      - "docker compose build succeeds"
+      - "docker compose up -d starts both services"
+      - "home-agent container shows healthy status"
+      - "jellyseerr-mcp container shows healthy status"
+      - "Bot responds to Telegram messages"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Dockerfile exists and uses multi-stage build"
+  - "docker-compose.yml orchestrates home-agent and jellyseerr-mcp"
+  - ".dockerignore excludes unnecessary files"
+  - ".env.example updated with Docker notes"
+  - "README.md has Docker deployment instructions"
+  - "docker compose build succeeds"
+  - "docker compose up -d starts services without errors"
+  - "Data persists in home-agent-data volume"

@@ -12,9 +12,14 @@ def test_config_loads_valid_env(mock_env):
 
 
 def test_missing_required_vars():
-    os.environ.clear()
+    # Must bypass the .env file too — otherwise pydantic-settings reads it
+    # even when os.environ is cleared, and validation passes.
     with pytest.raises(ValidationError):
-        AppConfig()
+        AppConfig(_env_file=None,
+                  telegram_bot_token=None,  # type: ignore[arg-type]
+                  openrouter_api_key=None,  # type: ignore[arg-type]
+                  jellyseerr_api_key=None,  # type: ignore[arg-type]
+                  allowed_telegram_ids=None)  # type: ignore[arg-type]
 
 
 def test_default_values(mock_env):

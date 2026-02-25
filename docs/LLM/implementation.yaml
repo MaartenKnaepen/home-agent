@@ -139,69 +139,125 @@ phases:
 
       '
   - files:
-    - mcp_servers/jellyseerr/server.py
+    - deployment/docker-compose.yml
     goal: MCP server exposing Jellyseerr search and request capabilities.
     id: '1.7'
     name: Jellyseerr MCP Server
-    notes: ''
-    scope: "- Search for existing community MCP server first\n- If none found/working,\
-      \ build with FastMCP\n- Core tools: search_media(query), get_media_details(id),\n\
-      \  request_media(id, quality), get_request_status(id)\n"
-    status: pending
-    test: '- test_jellyseerr_mcp.py — MCP server starts and lists expected tools
-
-      - search_media returns structured results against a mock Jellyseerr API
-
-      - request_media sends correct POST to Jellyseerr API
-
-      - Invalid media ID returns an error, not a crash
-
-      '
+    notes: 'Community Docker image ghcr.io/aserper/jellyseerr-mcp used. No custom code. Agent connects via FastMCPToolset("http://localhost:5056/mcp") in step 1.8.'
+    scope: "- Community MCP server deployed via Docker Compose\n- Agent connects via\
+      \ HTTP FastMCPToolset\n- Config from .env (JELLYSEERR_URL, JELLYSEERR_API_KEY,\
+      \ MCP_PORT)\n"
+    status: done
+    test: 'No unit tests — community server has no custom code to test. Integration
+      tested end-to-end in step 1.9.'
   - files:
+    - src/home_agent/mcp/__init__.py
     - src/home_agent/mcp/registry.py
     - src/home_agent/mcp/servers.py
-    goal: Central place to configure, start, and stop MCP server connections.
+    - tests/test_mcp_registry.py
+    - tests/test_mcp_servers.py
+    goal: Central place to configure and expose MCP server connections as PydanticAI toolsets.
     id: '1.8'
     name: MCP Registry & Lifecycle
-    notes: ''
-    scope: '- MCPRegistry class that holds MCP server configs
+    notes: 'MCPRegistry holds ServerConfig instances and creates FastMCPToolset(url)
+      on demand. No start/stop needed — Docker manages server lifecycle. get_jellyseerr_config()
+      factory reads MCP_PORT from AppConfig. Import-linter contract: mcp does not
+      import agent, bot, or main.'
+    scope: '- MCPRegistry class with register(), get_toolsets(), get_tool_names()
 
-      - start() / stop() lifecycle methods
+      - ServerConfig dataclass (name, url, enabled)
 
-      - Servers configured via AppConfig
+      - get_jellyseerr_config() factory in servers.py
 
-      - Registry passed to agent as toolsets
+      - FastMCPToolset instances created lazily (safe without live connection)
+
+      - Import-linter Layer 2 contract enforced
 
       '
-    status: pending
-    test: '- test_mcp_registry.py — Registry starts and stops MCP servers without
-      error
+    status: done
+    test: '- test_mcp_registry.py — 5 tests: registry stores configs, get_toolsets
+      returns FastMCPToolset per enabled server, disabled servers excluded, get_tool_names
+      returns names
 
-      - Registry exposes tool list from connected servers
-
-      - Agent can call tools through registry
+      - test_mcp_servers.py — 3 tests: get_jellyseerr_config returns correct ServerConfig
 
       '
   - files:
     - src/home_agent/main.py
+    - src/home_agent/agent.py
+    - tests/test_main.py
+    - tests/test_integration.py
+    - .env.example
     goal: 'End-to-end flow: Telegram message → Agent → MCP tools → Telegram reply.'
     id: '1.9'
     name: Wire It Together
-    notes: ''
-    scope: '- main() entry point that initializes config, DB, registry, agent, and
-      bot
+    notes: 'main.py is the composition root. get_agent_toolsets() added to agent.py
+      as a hook for toolset retrieval. MCPRegistry is created and populated in main.py
+      but toolsets are NOT yet passed to the agent — this requires a DI refactor
+      (see step 1.9b). Import-linter Layer 4 contract: no module imports main.'
+    scope: '- main() composition root: config → logging → DB → managers → MCP registry
+      → bot polling
 
-      - Message handler passes user text + history to agent, returns response to Telegram
+      - setup_logging() helper for root logger configuration
 
-      - Conversation persisted after each exchange
+      - get_agent_toolsets() factory in agent.py returning toolsets from registry
 
-      - Graceful shutdown of MCP servers and DB
+      - Graceful KeyboardInterrupt shutdown
+
+      - Import-linter Layer 4 contract enforced
+
+      - .env.example updated with MCP_PORT and LOG_LEVEL
 
       '
+    status: done
+    test: '- test_main.py — setup_logging sets root logger level, main() wires all
+      components with correct arguments, KeyboardInterrupt handled gracefully
+
+      - test_integration.py — full message pipeline: authorized user message persisted
+      to DB + agent reply sent; unauthorized user rejected and not persisted; agent
+      receives correct deps
+
+      - test_agent.py — get_agent_toolsets() delegates to registry.get_toolsets()
+
+      '
+  - files:
+    - src/home_agent/agent.py
+    - src/home_agent/bot.py
+    - src/home_agent/main.py
+    - tests/test_agent.py
+    - tests/test_bot.py
+    - tests/test_main.py
+    goal: Wire the MCPRegistry toolsets into the PydanticAI agent so MCP tools are
+      available at runtime.
+    id: '1.9b'
+    name: Wire MCP Toolsets into Agent
+    notes: ''
+    scope: "The agent is currently a module-level singleton defined in agent.py without\
+      \ toolsets. PydanticAI requires toolsets to be passed to Agent() at construction\
+      \ time — they cannot be added to an existing instance after the fact.\n\nThe\
+      \ refactor needed:\n1. Replace the module-level `agent` singleton in agent.py\
+      \ with a factory function\n   `create_agent(toolsets)` that constructs and returns\
+      \ an Agent with the\n   given toolsets.\n2. In main.py: call `create_agent(registry.get_toolsets())`\
+      \ after the registry is\n   populated, producing the fully-wired agent instance.\n\
+      3. In bot.py: replace the `from home_agent.agent import agent` import with an\n\
+      \   `agent` parameter on `make_message_handler()`, `create_application()`, and\n\
+      \   `run_bot()` — the agent is injected from main.py rather than imported as\
+      \ a\n   global singleton.\n4. Update all tests that reference the global `agent`\
+      \ to use the factory or\n   inject a TestModel-overridden agent instance.\n\n\
+      Key constraint: import-linter contracts must stay green. bot.py may not import\n\
+      main.py. The agent flows main → bot, not bot → agent (singleton).\n"
     status: pending
-    test: "- test_integration.py — Simulated message flow: user sends \"search for\
-      \ Inception\"\n  → agent calls Jellyseerr search tool → response contains movie\
-      \ info\n- Conversation is persisted in DB after exchange\n"
+    test: '- test_agent.py — create_agent() returns Agent with correct toolsets registered
+
+      - test_bot.py — make_message_handler() accepts agent parameter; handler calls
+      injected agent
+
+      - test_main.py — main() calls create_agent() with toolsets from registry and
+      passes result to run_bot()
+
+      - test_integration.py — end-to-end flow uses agent with mocked MCP toolset
+
+      '
   - files:
     - Dockerfile
     - docker-compose.yml
@@ -216,7 +272,7 @@ phases:
       - Health check endpoint (optional)
 
       '
-    status: pending
+    status: done
     test: '- docker build succeeds
 
       - docker-compose up starts the bot without errors

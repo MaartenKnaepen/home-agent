@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Tests and docs
+tests/
+docs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+.qwen/
+.rovodev/
+.import_linter_cache/
+data/
+*.db
+.env
+.python-version
+AGENTS.md
+QWEN.md
+verify.sh
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore

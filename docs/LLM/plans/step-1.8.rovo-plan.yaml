@@ -1,0 +1,406 @@
+step: "1.8"
+name: "MCP Registry & Lifecycle"
+phase: 1
+goal: "Central place to configure, start, and stop MCP server connections."
+
+context:
+  description: |
+    Step 1.8 creates the MCP registry module that manages MCP server connections
+    for the agent. Since the Jellyseerr MCP server runs as a Docker container
+    (step 1.7), the registry's job is to:
+
+    1. Hold MCP server configurations (URLs, enabled state)
+    2. Create FastMCPToolset instances for the agent
+    3. Provide a clean interface for enabling/disabling servers
+
+    The registry does NOT start/stop Docker containers — that's done manually
+    via `docker compose up/down`. The registry simply creates HTTP connections
+    to already-running MCP servers.
+
+    Per AGENTS.md:
+    - Use FastMCPToolset from pydantic_ai.toolsets.fastmcp
+    - HTTP transport for Docker-based MCP servers
+    - No subprocess management needed (servers run independently)
+
+    Existing context:
+    - Step 1.6 created agent.py with AgentDeps, system prompt, update_user_note tool
+    - Step 1.7 deployed Jellyseerr MCP server via Docker Compose
+    - Config.py has JELLYSEERR_URL, JELLYSEERR_API_KEY settings
+    - api.yaml documents all existing exports
+  dependencies:
+    - "src/home_agent/config.py — AppConfig with Jellyseerr settings"
+    - "src/home_agent/agent.py — Agent definition to wire MCP toolsets"
+  references:
+    - "AGENTS.md — MCP Server Connection Template (p.3)"
+    - "AGENTS.md — PydanticAI Critical Rules (p.3)"
+    - "deployment/docker-compose.yml — Jellyseerr MCP server endpoint at http://localhost:5056/mcp"
+    - "api.yaml — existing module exports"
+
+tasks:
+  - id: 1
+    title: "Create src/home_agent/mcp/__init__.py"
+    file: "src/home_agent/mcp/__init__.py"
+    action: "create"
+    description: |
+      Create the MCP package __init__.py to make it a proper Python package.
+
+      Export the main classes for easy importing:
+      - MCPRegistry from home_agent.mcp.registry
+    code_snippet: |
+      """MCP server registry and configuration for home-agent.
+
+      This package manages MCP server connections and exposes toolsets to the agent.
+      """
+
+      from home_agent.mcp.registry import MCPRegistry
+
+      __all__ = ["MCPRegistry"]
+    tests:
+      - "from home_agent.mcp import MCPRegistry succeeds"
+
+  - id: 2
+    title: "Create src/home_agent/mcp/servers.py with ServerConfig"
+    file: "src/home_agent/mcp/servers.py"
+    action: "create"
+    description: |
+      Create the MCP server configuration module.
+
+      Define ServerConfig dataclass with:
+      - name: str — Server identifier (e.g., 'jellyseerr')
+      - url: str — HTTP endpoint URL for the MCP server
+      - enabled: bool — Whether the server is active
+
+      Create get_jellyseerr_config() function that reads from AppConfig and returns
+      a ServerConfig for the Jellyseerr MCP server.
+
+      The URL should be constructed from MCP_PORT env var (default 5056).
+    code_snippet: |
+      """MCP server configurations.
+
+      Defines connection details for each MCP server (URL, enabled state).
+      """
+
+      from dataclasses import dataclass
+
+
+      @dataclass
+      class ServerConfig:
+          """Configuration for an MCP server.
+
+          Attributes:
+              name: Server identifier (e.g., 'jellyseerr').
+              url: HTTP endpoint URL for the MCP server.
+              enabled: Whether this server is active.
+          """
+
+          name: str
+          url: str
+          enabled: bool = True
+
+
+      def get_jellyseerr_config(mcp_port: int = 5056) -> ServerConfig:
+          """Create Jellyseerr MCP server configuration.
+
+          Args:
+              mcp_port: Port number for the MCP server HTTP endpoint.
+
+          Returns:
+              ServerConfig for the Jellyseerr MCP server.
+          """
+          return ServerConfig(
+              name="jellyseerr",
+              url=f"http://localhost:{mcp_port}/mcp",
+              enabled=True,
+          )
+    tests:
+      - "test_mcp_servers.py — get_jellyseerr_config returns ServerConfig with correct url"
+      - "test_mcp_servers.py — ServerConfig has name='jellyseerr' and enabled=True"
+      - "test_mcp_servers.py — URL uses provided mcp_port parameter"
+
+  - id: 3
+    title: "Create src/home_agent/mcp/registry.py with MCPRegistry class"
+    file: "src/home_agent/mcp/registry.py"
+    action: "create"
+    description: |
+      Create the MCPRegistry class that manages MCP server connections.
+
+      The registry:
+      - Holds ServerConfig instances for each MCP server
+      - Creates FastMCPToolset instances for each enabled server
+      - Exposes get_toolsets() method returning list of toolsets for the agent
+      - Exposes get_tool_names() for debugging/logging
+
+      For HTTP-based MCP servers (like Jellyseerr Docker container),
+      the registry simply creates FastMCPToolset("http://url/mcp") instances.
+
+      No start()/stop() methods needed — Docker containers are managed externally.
+    code_snippet: |
+      """MCP server registry and lifecycle management.
+
+      Manages MCP server connections and exposes toolsets to the agent.
+      """
+
+      from pydantic_ai.toolsets.fastmcp import FastMCPToolset
+
+      from home_agent.mcp.servers import ServerConfig
+
+
+      class MCPRegistry:
+          """Registry for MCP servers.
+
+          Manages server configurations and creates FastMCPToolset instances
+          for the PydanticAI agent.
+
+          Attributes:
+              servers: Dict mapping server names to ServerConfig instances.
+          """
+
+          def __init__(self) -> None:
+              """Initialize the MCP registry."""
+              self.servers: dict[str, ServerConfig] = {}
+
+          def register(self, config: ServerConfig) -> None:
+              """Register an MCP server configuration.
+
+              Args:
+                  config: Server configuration to register.
+              """
+              self.servers[config.name] = config
+
+          def get_toolsets(self) -> list[FastMCPToolset]:
+              """Create FastMCPToolset instances for all enabled servers.
+
+              Returns:
+                  List of FastMCPToolset instances for enabled servers.
+              """
+              toolsets = []
+              for server in self.servers.values():
+                  if server.enabled:
+                      toolset = FastMCPToolset(server.url)
+                      toolsets.append(toolset)
+              return toolsets
+
+          def get_tool_names(self) -> list[str]:
+              """Get list of enabled server names.
+
+              Returns:
+                  List of server names that are enabled.
+              """
+              return [s.name for s in self.servers.values() if s.enabled]
+    tests:
+      - "test_mcp_registry.py — Registry starts empty"
+      - "test_mcp_registry.py — register() adds server to registry"
+      - "test_mcp_registry.py — get_toolsets() returns FastMCPToolset for enabled servers"
+      - "test_mcp_registry.py — Disabled servers are excluded from toolsets"
+
+  - id: 4
+    title: "Create tests/test_mcp_servers.py"
+    file: "tests/test_mcp_servers.py"
+    action: "create"
+    description: |
+      Create tests for the MCP servers configuration module.
+
+      Test cases:
+      1. test_get_jellyseerr_config_returns_server_config
+      2. test_jellyseerr_config_has_correct_url
+      3. test_jellyseerr_config_url_uses_port_parameter
+
+      These are simple unit tests — no actual HTTP calls.
+    code_snippet: |
+      """Tests for MCP server configurations."""
+
+      from home_agent.mcp.servers import ServerConfig, get_jellyseerr_config
+
+
+      def test_get_jellyseerr_config_returns_server_config() -> None:
+          """get_jellyseerr_config returns a ServerConfig."""
+          config = get_jellyseerr_config(mcp_port=5056)
+          assert isinstance(config, ServerConfig)
+
+
+      def test_jellyseerr_config_has_correct_url() -> None:
+          """Jellyseerr config has expected MCP endpoint URL."""
+          config = get_jellyseerr_config(mcp_port=5056)
+          assert config.name == "jellyseerr"
+          assert config.url == "http://localhost:5056/mcp"
+          assert config.enabled is True
+
+
+      def test_jellyseerr_config_url_uses_port_parameter() -> None:
+          """Jellyseerr config URL uses the provided port parameter."""
+          config = get_jellyseerr_config(mcp_port=5057)
+          assert config.url == "http://localhost:5057/mcp"
+    tests:
+      - "All tests pass with pytest"
+
+  - id: 5
+    title: "Create tests/test_mcp_registry.py"
+    file: "tests/test_mcp_registry.py"
+    action: "create"
+    description: |
+      Create tests for the MCPRegistry class.
+
+      Test cases:
+      1. test_registry_starts_empty
+      2. test_register_adds_server
+      3. test_get_toolsets_returns_toolsets
+      4. test_get_toolsets_excludes_disabled_servers
+      5. test_get_tool_names_returns_enabled_names
+
+      Mock FastMCPToolset to avoid actual HTTP connections.
+    code_snippet: |
+      """Tests for MCP registry."""
+
+      from unittest.mock import patch
+
+      from home_agent.mcp.registry import MCPRegistry
+      from home_agent.mcp.servers import ServerConfig
+
+
+      def test_registry_starts_empty() -> None:
+          """Registry starts with no servers."""
+          registry = MCPRegistry()
+          assert len(registry.servers) == 0
+
+
+      def test_register_adds_server() -> None:
+          """register() adds server to registry."""
+          registry = MCPRegistry()
+          config = ServerConfig(
+              name="jellyseerr",
+              url="http://localhost:5056/mcp",
+              enabled=True,
+          )
+          registry.register(config)
+          assert len(registry.servers) == 1
+          assert "jellyseerr" in registry.servers
+
+
+      def test_get_toolsets_returns_toolsets() -> None:
+          """get_toolsets() returns FastMCPToolset instances."""
+          registry = MCPRegistry()
+          config = ServerConfig(
+              name="jellyseerr",
+              url="http://localhost:5056/mcp",
+              enabled=True,
+          )
+          registry.register(config)
+          with patch("home_agent.mcp.registry.FastMCPToolset") as mock_toolset:
+              toolsets = registry.get_toolsets()
+              assert len(toolsets) == 1
+              mock_toolset.assert_called_once_with("http://localhost:5056/mcp")
+
+
+      def test_get_toolsets_excludes_disabled_servers() -> None:
+          """get_toolsets() excludes disabled servers."""
+          registry = MCPRegistry()
+          registry.register(
+              ServerConfig(name="jellyseerr", url="http://localhost:5056/mcp", enabled=True)
+          )
+          registry.register(
+              ServerConfig(name="glances", url="http://localhost:5057/mcp", enabled=False)
+          )
+          toolsets = registry.get_toolsets()
+          assert len(toolsets) == 1
+          # Only jellyseerr (enabled) should be included
+
+
+      def test_get_tool_names_returns_enabled_names() -> None:
+          """get_tool_names() returns names of enabled servers."""
+          registry = MCPRegistry()
+          registry.register(
+              ServerConfig(name="jellyseerr", url="http://localhost:5056/mcp", enabled=True)
+          )
+          registry.register(
+              ServerConfig(name="glances", url="http://localhost:5057/mcp", enabled=False)
+          )
+          names = registry.get_tool_names()
+          assert names == ["jellyseerr"]
+    tests:
+      - "All tests pass with pytest"
+
+  - id: 6
+    title: "Update pyproject.toml import-linter contracts for mcp module"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Uncomment and update the import-linter contract for the mcp module.
+
+      The mcp module should not import agent, bot, or main (layer separation).
+      Add a contract that forbids home_agent.mcp from importing:
+      - home_agent.agent
+      - home_agent.bot
+      - home_agent.main
+
+      This ensures the MCP layer stays independent from the agent and bot layers.
+    code_snippet: |
+      [[tool.importlinter.contracts]]
+      name = "tools and mcp do not import agent or bot"
+      type = "forbidden"
+      source_modules = ["home_agent.tools", "home_agent.mcp"]
+      forbidden_modules = [
+          "home_agent.agent",
+          "home_agent.bot",
+          "home_agent.main",
+      ]
+    tests:
+      - "lint-imports passes with no forbidden import errors"
+
+  - id: 7
+    title: "Update api.yaml with MCP module exports"
+    file: "docs/LLM/api.yaml"
+    action: "modify"
+    description: |
+      Add the new MCP module exports to api.yaml for future reference.
+
+      Document:
+      - src/home_agent/mcp/__init__.py — MCPRegistry export
+      - src/home_agent/mcp/servers.py — ServerConfig, get_jellyseerr_config
+      - src/home_agent/mcp/registry.py — MCPRegistry class with methods
+    code_snippet: |
+      # ── src/home_agent/mcp/servers.py ───────────────────────────────────────
+      - module: "src/home_agent/mcp/servers.py"
+        exports:
+          - name: "ServerConfig"
+            type: "dataclass"
+            signature: "name: str, url: str, enabled: bool = True"
+            description: "Configuration for an MCP server with name, URL, and enabled state."
+
+          - name: "get_jellyseerr_config"
+            type: "function"
+            signature: "(mcp_port: int = 5056) -> ServerConfig"
+            description: "Create Jellyseerr MCP server configuration with URL http://localhost:{port}/mcp."
+
+      # ── src/home_agent/mcp/registry.py ──────────────────────────────────────
+      - module: "src/home_agent/mcp/registry.py"
+        exports:
+          - name: "MCPRegistry"
+            type: "class"
+            signature: "__init__() -> None"
+            description: "Registry for MCP servers. Manages configurations and creates FastMCPToolset instances."
+
+          - name: "MCPRegistry.register"
+            type: "method"
+            signature: "(config: ServerConfig) -> None"
+            description: "Register an MCP server configuration."
+
+          - name: "MCPRegistry.get_toolsets"
+            type: "method"
+            signature: "() -> list[FastMCPToolset]"
+            description: "Create FastMCPToolset instances for all enabled servers."
+
+          - name: "MCPRegistry.get_tool_names"
+            type: "method"
+            signature: "() -> list[str]"
+            description: "Get list of enabled server names."
+    tests:
+      - "api.yaml contains valid YAML"
+      - "All new MCP module exports are documented"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "MCPRegistry creates FastMCPToolset for Jellyseerr"
+  - "Import linter contract for mcp module activated and passing"
+  - "All unit tests pass without actual HTTP calls"
+  - "api.yaml updated with MCP module exports"

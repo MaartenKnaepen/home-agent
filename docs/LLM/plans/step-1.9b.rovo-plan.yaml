@@ -1,0 +1,819 @@
+step: "1.9b"
+name: "Wire MCP Toolsets into Agent"
+phase: 1
+goal: "Wire the MCPRegistry toolsets into the PydanticAI agent so MCP tools are available at runtime."
+
+context:
+  description: |
+    Step 1.9b refactors the agent from a module-level singleton to a factory pattern,
+    enabling MCP toolsets to be passed at construction time. This is required because
+    PydanticAI requires toolsets to be passed to Agent() at construction — they cannot
+    be added to an existing instance afterward.
+
+    Current state:
+    - agent.py defines `agent` as a module-level singleton without toolsets
+    - bot.py imports `agent` directly and uses it in handle_message()
+    - main.py creates MCPRegistry but toolsets are not passed to the agent
+    - get_agent_toolsets() helper exists but is not used to wire the agent
+
+    Required refactor:
+    1. Replace singleton with create_agent(toolsets) factory function
+    2. main.py calls create_agent() with registry.get_toolsets()
+    3. bot.py accepts agent as parameter instead of importing singleton
+    4. Update tests to use factory or inject test agent
+
+    Import-linter constraints:
+    - bot.py cannot import main.py (already enforced)
+    - Agent flows main → bot via dependency injection, not bot → agent singleton
+  dependencies:
+    - "src/home_agent/agent.py — Current singleton definition"
+    - "src/home_agent/bot.py — Imports agent singleton"
+    - "src/home_agent/main.py — Composition root that wires components"
+    - "src/home_agent/mcp/registry.py — MCPRegistry.get_toolsets()"
+  references:
+    - "AGENTS.md — Agent Definition Template (p.2)"
+    - "AGENTS.md — MCP Server Connection Template (p.3)"
+    - "implementation.yaml — Step 1.9b scope and test criteria"
+    - "memory.yaml — Step 1.9 completed, toolsets not yet wired"
+
+tasks:
+  - id: 1
+    title: "Refactor agent.py: Replace singleton with factory function"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      Replace the module-level `agent` singleton with a factory function that
+      accepts toolsets and returns a fully-configured Agent instance.
+
+      Changes:
+      1. Remove the module-level `agent = Agent(...)` singleton
+      2. Create `create_agent(toolsets: list[FastMCPToolset] | None = None)` function
+      3. Keep AgentDeps, inject_user_profile, update_user_note unchanged
+      4. Export create_agent from the module
+
+      The factory function:
+      - Accepts optional toolsets list (default None for tests)
+      - Creates Agent with toolsets passed to constructor
+      - Returns the Agent instance
+
+      Keep get_agent_toolsets() as it provides a clean API for main.py.
+    code_snippet: |
+      """PydanticAI agent for home server management.
+
+      Adheres to home-agent coding standards: type hints, Google-style docstrings, async-first.
+      """
+
+      from __future__ import annotations
+
+      import logging
+      from dataclasses import dataclass
+
+      from pydantic_ai import Agent, RunContext
+      from pydantic_ai.toolsets.fastmcp import FastMCPToolset
+
+      from home_agent.config import AppConfig
+      from home_agent.history import HistoryManager, sliding_window_processor
+      from home_agent.mcp.registry import MCPRegistry
+      from home_agent.profile import ProfileManager, UserProfile
+
+      logger = logging.getLogger(__name__)
+
+
+      @dataclass
+      class AgentDeps:
+          """Dependencies injected into the agent at runtime.
+
+          Attributes:
+              config: Application configuration.
+              profile_manager: Manages user profile persistence.
+              history_manager: Manages conversation history.
+              user_profile: The current user's profile.
+          """
+
+          config: AppConfig
+          profile_manager: ProfileManager
+          history_manager: HistoryManager
+          user_profile: UserProfile
+
+
+      def create_agent(toolsets: list[FastMCPToolset] | None = None) -> Agent:
+          """Create a PydanticAI agent with MCP toolsets.
+
+          Args:
+              toolsets: Optional list of FastMCPToolset instances for MCP servers.
+                  If None, the agent runs without MCP tools (useful for tests).
+
+          Returns:
+              Configured Agent instance ready for run() calls.
+          """
+          return Agent(
+              "openrouter:qwen/qwq-32b:free",
+              deps_type=AgentDeps,
+              defer_model_check=True,
+              toolsets=toolsets or [],
+              history_processors=[sliding_window_processor(n=20)],
+              system_prompt=(
+                  "You are a helpful home server assistant. "
+                  "You help the user manage their home server services including media, monitoring, and more. "
+                  "Always be concise and friendly. "
+                  "For destructive or irreversible actions, always ask for confirmation before proceeding."
+              ),
+          )
+
+
+      @agent.system_prompt(dynamic=True)  # Will need to update this after refactor
+      async def inject_user_profile(ctx: RunContext[AgentDeps]) -> str:
+          """Inject user profile into the system prompt dynamically.
+
+          Args:
+              ctx: Runtime context with dependencies.
+
+          Returns:
+              A string fragment to append to the system prompt.
+          """
+          profile = ctx.deps.user_profile
+          name_part = f"The user's name is {profile.name}." if profile.name else "The user has not set a name."
+          prefs = profile.media_preferences
+          notes_part = ("Notes about this user: " + "; ".join(profile.notes)) if profile.notes else ""
+          return (
+              f"{name_part} "
+              f"Media preferences — quality: {prefs.preferred_quality}, "
+              f"language: {prefs.preferred_language}, "
+              f"genres: {prefs.preferred_genres or 'none set'}, "
+              f"avoid: {prefs.avoid_genres or 'none'}. "
+              f"{notes_part}"
+          ).strip()
+
+
+      @agent.tool  # Will need to update this after refactor
+      async def update_user_note(ctx: RunContext[AgentDeps], note: str) -> str:
+          """Add an observation about the user to their profile.
+
+          Call this when you learn something meaningful about the user's preferences,
+          habits, or personality that would help you serve them better in future
+          conversations.
+
+          Args:
+              ctx: Runtime context with dependencies.
+              note: Free-form note about the user's preferences or behavior.
+
+          Returns:
+              Confirmation message.
+          """
+          profile = ctx.deps.user_profile
+          profile.notes.append(note)
+          await ctx.deps.profile_manager.save(profile)
+          logger.info("Added note to profile for user %s", profile.user_id)
+          return f"Noted: {note}"
+
+
+      def get_agent_toolsets(registry: MCPRegistry) -> list[FastMCPToolset]:
+          """Get MCP toolsets from the registry for agent construction.
+
+          Args:
+              registry: MCP registry with registered server configurations.
+
+          Returns:
+              List of FastMCPToolset instances for all enabled servers.
+          """
+          return registry.get_toolsets()
+    tests:
+      - "create_agent() returns Agent instance"
+      - "create_agent(toolsets=[...]) includes toolsets in agent"
+      - "create_agent() without toolsets creates agent with empty toolsets list"
+      - "AgentDeps dataclass is exported"
+      - "inject_user_profile and update_user_note are defined (need agent reference fix)"
+
+  - id: 2
+    title: "Fix decorator references after singleton removal"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      After removing the singleton, the @agent.system_prompt and @agent.tool
+      decorators will fail because `agent` is no longer defined at module level.
+
+      Solution: Define these functions separately and register them after agent creation.
+
+      Option A: Create a class-based approach with methods
+      Option B: Return a named tuple with agent and setup functions
+      Option C: Use a closure pattern
+
+      Let's use Option C — create a setup_agent() function that:
+      1. Creates the agent
+      2. Registers the dynamic system prompt
+      3. Registers the update_user_note tool
+      4. Returns the configured agent
+
+      Actually, simpler: Keep the decorator pattern but apply them inside
+      create_agent() after the agent is created.
+
+      Best approach per PydanticAI: Define the functions separately, then
+      register them after creating the agent in create_agent().
+    code_snippet: |
+      # Refactored agent.py with proper decorator handling:
+
+      def create_agent(toolsets: list[FastMCPToolset] | None = None) -> Agent:
+          """Create a PydanticAI agent with MCP toolsets."""
+          agent_instance = Agent(
+              "openrouter:qwen/qwq-32b:free",
+              deps_type=AgentDeps,
+              defer_model_check=True,
+              toolsets=toolsets or [],
+              history_processors=[sliding_window_processor(n=20)],
+              system_prompt=(
+                  "You are a helpful home server assistant. "
+                  "You help the user manage their home server services including media, monitoring, and more. "
+                  "Always be concise and friendly. "
+                  "For destructive or irreversible actions, always ask for confirmation before proceeding."
+              ),
+          )
+
+          # Register dynamic system prompt
+          @agent_instance.system_prompt(dynamic=True)
+          async def inject_user_profile(ctx: RunContext[AgentDeps]) -> str:
+              """Inject user profile into the system prompt dynamically."""
+              profile = ctx.deps.user_profile
+              name_part = f"The user's name is {profile.name}." if profile.name else "The user has not set a name."
+              prefs = profile.media_preferences
+              notes_part = ("Notes about this user: " + "; ".join(profile.notes)) if profile.notes else ""
+              return (
+                  f"{name_part} "
+                  f"Media preferences — quality: {prefs.preferred_quality}, "
+                  f"language: {prefs.preferred_language}, "
+                  f"genres: {prefs.preferred_genres or 'none set'}, "
+                  f"avoid: {prefs.avoid_genres or 'none'}. "
+                  f"{notes_part}"
+              ).strip()
+
+          # Register update_user_note tool
+          @agent_instance.tool
+          async def update_user_note(ctx: RunContext[AgentDeps], note: str) -> str:
+              """Add an observation about the user to their profile."""
+              profile = ctx.deps.user_profile
+              profile.notes.append(note)
+              await ctx.deps.profile_manager.save(profile)
+              logger.info("Added note to profile for user %s", profile.user_id)
+              return f"Noted: {note}"
+
+          return agent_instance
+    tests:
+      - "create_agent() returns agent with inject_user_profile registered"
+      - "create_agent() returns agent with update_user_note tool registered"
+      - "Dynamic system prompt is called with correct context"
+      - "update_user_note tool modifies profile and persists"
+
+  - id: 3
+    title: "Update bot.py: Accept agent as parameter instead of importing singleton"
+    file: "src/home_agent/bot.py"
+    action: "modify"
+    description: |
+      Update bot.py to accept the agent as a parameter rather than importing
+      it as a module-level singleton.
+
+      Changes:
+      1. Remove `from home_agent.agent import agent` import
+      2. Add `agent: Agent` parameter to make_message_handler()
+      3. Add `agent: Agent` parameter to create_application()
+      4. Add `agent: Agent` parameter to run_bot()
+      5. Pass agent through the call chain
+
+      This enables dependency injection from main.py.
+    code_snippet: |
+      """Telegram bot wiring for home-agent.
+
+      Adheres to home-agent coding standards: type hints, Google-style docstrings, async-first.
+      Business logic lives in agent.py. This module is Telegram wiring only.
+      """
+
+      from __future__ import annotations
+
+      import logging
+
+      from pydantic_ai import Agent
+      from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+      from telegram import Update
+      from telegram.constants import ChatAction
+      from telegram.ext import (
+          Application,
+          ContextTypes,
+          MessageHandler,
+          filters,
+      )
+
+      from home_agent.config import AppConfig
+      from home_agent.history import HistoryManager
+      from home_agent.profile import ProfileManager
+
+      logger = logging.getLogger(__name__)
+
+      _REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
+
+
+      def make_message_handler(
+          config: AppConfig,
+          profile_manager: ProfileManager,
+          history_manager: HistoryManager,
+          agent: Agent,  # New parameter: injected agent instance
+      ):
+          """Create a Telegram message handler closure.
+
+          Args:
+              config: Application configuration containing the allowed user whitelist.
+              profile_manager: Manages user profile persistence.
+              history_manager: Manages conversation history persistence.
+              agent: PydanticAI agent instance for processing messages.
+
+          Returns:
+              An async handler coroutine compatible with python-telegram-bot.
+          """
+
+          async def handle_message(
+              update: Update, context: ContextTypes.DEFAULT_TYPE
+          ) -> None:
+              # ... existing code ...
+              async with agent:
+                  result = await agent.run(text, deps=deps, message_history=message_history)
+              # ... existing code ...
+
+          return handle_message
+
+
+      def create_application(
+          config: AppConfig,
+          profile_manager: ProfileManager,
+          history_manager: HistoryManager,
+          agent: Agent,  # New parameter
+      ) -> Application:
+          """Build and return a configured Telegram Application.
+
+          Args:
+              config: Application configuration.
+              profile_manager: Manages user profile persistence.
+              history_manager: Manages conversation history persistence.
+              agent: PydanticAI agent instance for processing messages.
+
+          Returns:
+              A fully configured telegram.ext.Application instance.
+          """
+          token = config.telegram_bot_token.get_secret_value()
+          app: Application = Application.builder().token(token).build()
+          handler = make_message_handler(config, profile_manager, history_manager, agent)
+          app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
+          logger.info("Telegram application configured with whitelist: %s", config.allowed_telegram_ids)
+          return app
+
+
+      def run_bot(
+          config: AppConfig,
+          profile_manager: ProfileManager,
+          history_manager: HistoryManager,
+          agent: Agent,  # New parameter
+      ) -> None:
+          """Build the Telegram application and start polling for updates.
+
+          Args:
+              config: Application configuration.
+              profile_manager: Manages user profile persistence.
+              history_manager: Manages conversation history persistence.
+              agent: PydanticAI agent instance for processing messages.
+          """
+          logger.info("Starting Telegram bot polling…")
+          create_application(config, profile_manager, history_manager, agent).run_polling()
+    tests:
+      - "make_message_handler() accepts agent parameter"
+      - "create_application() accepts agent parameter"
+      - "run_bot() accepts agent parameter"
+      - "Handler uses injected agent for run() calls"
+
+  - id: 4
+    title: "Update main.py: Create agent with toolsets and inject into bot"
+    file: "src/home_agent/main.py"
+    action: "modify"
+    description: |
+      Update main.py to create the agent with MCP toolsets and pass it to run_bot().
+
+      Changes:
+      1. Import create_agent and get_agent_toolsets from agent.py
+      2. After creating registry, call get_agent_toolsets(registry)
+      3. Call create_agent(toolsets) to get the wired agent
+      4. Pass agent to run_bot()
+    code_snippet: |
+      """Home agent main entry point.
+
+      Wires together config, database, MCP registry, agent, and Telegram bot.
+      This is the composition root — the only place where all components are assembled.
+      """
+
+      from __future__ import annotations
+
+      import asyncio
+      import logging
+
+      from home_agent.bot import run_bot
+      from home_agent.config import get_config
+      from home_agent.db import init_db
+      from home_agent.history import HistoryManager
+      from home_agent.mcp.registry import MCPRegistry
+      from home_agent.mcp.servers import get_jellyseerr_config
+      from home_agent.profile import ProfileManager
+      from home_agent.agent import create_agent, get_agent_toolsets
+
+      logger = logging.getLogger(__name__)
+
+
+      def setup_logging(log_level: str) -> None:
+          """Configure root logger with the given level."""
+          numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+          logging.basicConfig(
+              level=numeric_level,
+              format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+          )
+          logging.getLogger().setLevel(numeric_level)
+
+
+      def main() -> None:
+          """Initialize all components and start the Telegram bot."""
+          config = get_config()
+          setup_logging(config.log_level)
+          logger.info("Starting home-agent...")
+
+          # Ensure DB directory exists
+          config.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+          # Initialize database
+          logger.info("Initializing database at %s", config.db_path)
+          asyncio.run(init_db(config.db_path))
+
+          # Create managers
+          profile_manager = ProfileManager(db_path=config.db_path)
+          history_manager = HistoryManager(db_path=config.db_path)
+
+          # Register MCP servers
+          registry = MCPRegistry()
+          registry.register(get_jellyseerr_config())
+          logger.info("Registered MCP servers: %s", registry.get_tool_names())
+
+          # Create agent with MCP toolsets
+          toolsets = get_agent_toolsets(registry)
+          logger.info("Creating agent with %d MCP toolsets", len(toolsets))
+          agent = create_agent(toolsets=toolsets)
+
+          # Start Telegram bot (blocks until Ctrl-C)
+          logger.info("Starting Telegram bot...")
+          try:
+              run_bot(config, profile_manager, history_manager, agent)
+          except KeyboardInterrupt:
+              logger.info("Shutting down home-agent...")
+
+
+      if __name__ == "__main__":
+          main()
+    tests:
+      - "main() calls create_agent() with toolsets from registry"
+      - "main() passes agent to run_bot()"
+      - "Agent is created with Jellyseerr MCP toolset"
+
+  - id: 5
+    title: "Update tests/test_agent.py for factory pattern"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Update test_agent.py to use the create_agent() factory instead of
+      referencing the module-level singleton.
+
+      Changes:
+      1. Import create_agent from home_agent.agent
+      2. Update tests to call create_agent() for fresh agent instances
+      3. Use TestModel override for all agent.run() calls
+      4. Test that create_agent() registers tools correctly
+    code_snippet: |
+      """Tests for the PydanticAI agent factory."""
+
+      import pytest
+      from pydantic_ai.models.test import TestModel
+      from unittest.mock import AsyncMock, MagicMock
+
+      from home_agent.agent import create_agent, AgentDeps
+      from home_agent.profile import UserProfile, MediaPreferences, NotificationPrefs
+      from home_agent.mcp.registry import MCPRegistry
+
+
+      @pytest.fixture
+      def mock_config() -> MagicMock:
+          """Create a mock AppConfig."""
+          config = MagicMock()
+          config.telegram_bot_token = "test_token"
+          config.openrouter_api_key = "test_key"
+          config.allowed_telegram_ids = [12345]
+          return config
+
+
+      @pytest.fixture
+      def default_test_profile() -> UserProfile:
+          """Create a default user profile for testing."""
+          return UserProfile(
+              name="Test User",
+              media_preferences=MediaPreferences(
+                  preferred_genres=["sci-fi", "action"],
+                  preferred_quality="1080p",
+                  preferred_language="en",
+              ),
+              notification_prefs=NotificationPrefs(),
+              notes=[],
+          )
+
+
+      @pytest.fixture
+      def mock_deps(mock_config: MagicMock, default_test_profile: UserProfile) -> AgentDeps:
+          """Create mock dependencies for agent testing."""
+          profile_manager = AsyncMock()
+          profile_manager.save = AsyncMock()
+          history_manager = AsyncMock()
+          history_manager.save_message = AsyncMock()
+          history_manager.get_history = AsyncMock(return_value=[])
+          return AgentDeps(
+              config=mock_config,
+              profile_manager=profile_manager,
+              history_manager=history_manager,
+              user_profile=default_test_profile,
+          )
+
+
+      def test_create_agent_returns_agent() -> None:
+          """create_agent() returns a PydanticAI Agent instance."""
+          agent_instance = create_agent()
+          assert agent_instance is not None
+
+
+      def test_create_agent_with_toolsets() -> None:
+          """create_agent() accepts toolsets parameter."""
+          mock_toolset = MagicMock()
+          agent_instance = create_agent(toolsets=[mock_toolset])
+          # Verify toolsets were registered (check via internal state or behavior)
+          # PydanticAI doesn't expose toolsets publicly, so we test behavior
+
+
+      @pytest.mark.asyncio
+      async def test_agent_has_update_user_note_tool(mock_deps: AgentDeps) -> None:
+          """Agent registers update_user_note tool."""
+          agent_instance = create_agent()
+          m = TestModel()
+          with agent_instance.override(model=m):
+              result = await agent_instance.run("test", deps=mock_deps)
+              assert result.output is not None
+          # Verify tool was registered
+          assert m.last_model_request_parameters is not None
+          tool_names = [
+              t.name for t in m.last_model_request_parameters.function_tools
+          ]
+          assert "update_user_note" in tool_names
+
+
+      @pytest.mark.asyncio
+      async def test_update_user_note_modifies_profile(
+          mock_deps: AgentDeps,
+      ) -> None:
+          """update_user_note tool appends note and saves profile."""
+          agent_instance = create_agent()
+          note = "User prefers sci-fi movies"
+          tool_result = await agent_instance.tools["update_user_note"].run(
+              {"note": note}, deps=mock_deps
+          )
+          assert "Noted" in tool_result.output
+          mock_deps.profile_manager.save.assert_called_once()
+          saved_profile = mock_deps.profile_manager.save.call_args[0][0]
+          assert note in saved_profile.notes
+    tests:
+      - "test_create_agent_returns_agent passes"
+      - "test_create_agent_with_toolsets passes"
+      - "test_agent_has_update_user_note_tool passes"
+      - "test_update_user_note_modifies_profile passes"
+
+  - id: 6
+    title: "Update tests/test_bot.py for injected agent"
+    file: "tests/test_bot.py"
+    action: "modify"
+    description: |
+      Update test_bot.py to pass agent as a parameter to bot functions.
+
+      Changes:
+      1. Import create_agent from home_agent.agent
+      2. Create test agent instance with create_agent()
+      3. Pass agent to make_message_handler(), create_application()
+    code_snippet: |
+      """Tests for the Telegram bot wiring."""
+
+      import pytest
+      from unittest.mock import AsyncMock, MagicMock
+
+      from home_agent.agent import create_agent
+      from home_agent.bot import make_message_handler, create_application
+      from home_agent.config import AppConfig
+
+
+      @pytest.fixture
+      def test_agent():
+          """Create a test agent instance."""
+          return create_agent()
+
+
+      @pytest.fixture
+      def mock_config() -> AppConfig:
+          """Create test configuration."""
+          return AppConfig(
+              telegram_bot_token="test_token",
+              openrouter_api_key="test_key",
+              jellyseerr_api_key="test_jelly",
+              allowed_telegram_ids=[12345],
+              jellyseerr_url="http://localhost:5055",
+              db_path="data/test.db",
+          )
+
+
+      def test_make_message_handler_accepts_agent(
+          mock_config: AppConfig,
+          test_agent,
+          tmp_path,
+      ) -> None:
+          """make_message_handler() accepts agent parameter."""
+          from home_agent.profile import ProfileManager
+          from home_agent.history import HistoryManager
+
+          profile_manager = ProfileManager(db_path=tmp_path / "test.db")
+          history_manager = HistoryManager(db_path=tmp_path / "test.db")
+
+          handler = make_message_handler(
+              mock_config, profile_manager, history_manager, test_agent
+          )
+          assert callable(handler)
+    tests:
+      - "test_make_message_handler_accepts_agent passes"
+      - "Handler is callable with injected agent"
+
+  - id: 7
+    title: "Update tests/test_main.py for agent factory"
+    file: "tests/test_main.py"
+    action: "modify"
+    description: |
+      Update test_main.py to verify agent creation with toolsets.
+
+      Test that main() creates agent with toolsets from registry.
+    code_snippet: |
+      """Tests for the main entry point."""
+
+      import pytest
+      from unittest.mock import patch, MagicMock, AsyncMock
+      from pathlib import Path
+
+      from home_agent.main import main, setup_logging
+      from home_agent.agent import create_agent
+
+
+      def test_setup_logging() -> None:
+          """setup_logging() configures root logger level."""
+          import logging
+          setup_logging("DEBUG")
+          assert logging.getLogger().level == logging.DEBUG
+
+
+      def test_main_wires_components(tmp_path: Path) -> None:
+          """main() wires all components with correct arguments."""
+          # Mock run_bot to prevent actual polling
+          with patch("home_agent.main.run_bot") as mock_run_bot:
+              with patch.dict("os.environ", {
+                  "TELEGRAM_BOT_TOKEN": "test",
+                  "OPENROUTER_API_KEY": "test",
+                  "JELLYSEERR_API_KEY": "test",
+                  "ALLOWED_TELEGRAM_IDS": "[123]",
+                  "DB_PATH": str(tmp_path / "test.db"),
+              }, clear=True):
+                  # main() will be called but run_bot is mocked
+                  # This test verifies the wiring, not the actual bot execution
+                  pass  # main() would be called here
+
+          # Verify run_bot was called (would need more sophisticated mocking)
+    tests:
+      - "test_setup_logging passes"
+      - "main() creates agent with toolsets"
+
+  - id: 8
+    title: "Update tests/test_integration.py for factory pattern"
+    file: "tests/test_integration.py"
+    action: "modify"
+    description: |
+      Update test_integration.py to use create_agent() factory.
+
+      The integration test should create an agent with mocked toolsets
+      to verify the full message flow.
+    code_snippet: |
+      """Integration tests for home-agent end-to-end flow."""
+
+      import pytest
+      from pathlib import Path
+      from unittest.mock import AsyncMock, patch, MagicMock
+
+      from home_agent.config import AppConfig
+      from home_agent.db import init_db, get_history
+      from home_agent.profile import ProfileManager
+      from home_agent.history import HistoryManager
+      from home_agent.agent import create_agent
+      from home_agent.bot import make_message_handler
+      from pydantic_ai.models.test import TestModel
+
+
+      @pytest.fixture
+      async def integration_db(tmp_path: Path) -> Path:
+          """Create a temporary database for integration tests."""
+          db_path = tmp_path / "integration.db"
+          await init_db(db_path)
+          return db_path
+
+
+      @pytest.fixture
+      def integration_config() -> AppConfig:
+          """Create test configuration."""
+          return AppConfig(
+              telegram_bot_token="test_token",
+              openrouter_api_key="test_key",
+              jellyseerr_api_key="test_jelly_key",
+              allowed_telegram_ids=[12345],
+              jellyseerr_url="http://localhost:5055",
+              db_path="data/test.db",
+              log_level="DEBUG",
+          )
+
+
+      @pytest.fixture
+      def test_agent():
+          """Create a test agent instance."""
+          return create_agent()
+
+
+      @pytest.mark.asyncio
+      async def test_message_flow_persists_history(
+          integration_config: AppConfig,
+          integration_db: Path,
+          test_agent,
+      ) -> None:
+          """Message flow persists conversation history to database."""
+          profile_manager = ProfileManager(db_path=integration_db)
+          history_manager = HistoryManager(db_path=integration_db)
+
+          handler = make_message_handler(
+              integration_config,
+              profile_manager,
+              history_manager,
+              test_agent,
+          )
+
+          # Create mock update
+          from telegram import Update, User, Message, Chat
+          user = User(id=12345, is_bot=False, first_name="Test")
+          chat = Chat(id=12345, type="private")
+          message = MagicMock(spec=Message)
+          message.text = "Hello"
+          message.from_user = user
+          message.chat = chat
+          message.reply_text = AsyncMock()
+          message.effective_chat = chat
+
+          update = MagicMock(spec=Update)
+          update.effective_user = user
+          update.message = message
+          update.effective_message = message
+
+          context = MagicMock()
+
+          # Mock the agent response with TestModel
+          with patch.object(test_agent, 'run', new_callable=AsyncMock) as mock_run:
+              mock_result = MagicMock()
+              mock_result.output = "Hello there!"
+              mock_run.return_value = mock_result
+
+              # Call handler
+              await handler(update, context)
+
+          # Verify message was sent
+          message.reply_text.assert_called_once()
+
+          # Verify history was persisted
+          history = await history_manager.get_history(user_id=12345)
+          assert len(history) == 2
+          assert history[0]["role"] == "user"
+          assert history[0]["content"] == "Hello"
+          assert history[1]["role"] == "assistant"
+          assert history[1]["content"] == "Hello there!"
+    tests:
+      - "test_message_flow_persists_history passes"
+      - "Agent is injected into handler"
+      - "History is persisted correctly"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "create_agent() returns Agent with toolsets registered"
+  - "bot.py accepts agent parameter (no singleton import)"
+  - "main() creates agent with MCP toolsets from registry"
+  - "All tests updated to use factory pattern"
+  - "Import-linter contracts pass (no circular imports)"
+  - "End-to-end message flow works with injected agent"

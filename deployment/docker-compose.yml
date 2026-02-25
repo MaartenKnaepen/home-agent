@@ -1,0 +1,56 @@
+# Run from the project root: docker compose -f deployment/docker-compose.yml --env-file .env up -d
+# OR: cd deployment && ln -s ../.env .env && docker compose up -d
+services:
+  home-agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: home-agent
+    env_file:
+      - ../.env
+    environment:
+      # When running in Docker Compose, MCP server is reachable via service name
+      - MCP_HOST=jellyseerr-mcp
+    volumes:
+      - home-agent-data:/app/data
+    restart: unless-stopped
+    depends_on:
+      jellyseerr-mcp:
+        condition: service_healthy
+    networks:
+      - home-agent-network
+
+  jellyseerr-mcp:
+    image: ghcr.io/aserper/jellyseerr-mcp:latest
+    container_name: jellyseerr-mcp
+    env_file:
+      - ../.env
+    environment:
+      # The PORT var is what jellyseerr-mcp container reads for its HTTP port
+      - PORT=${MCP_PORT:-5056}
+      # MCP_HOST tells our patched main.py to bind to all interfaces
+      - MCP_HOST=0.0.0.0
+    volumes:
+      # Mount patched main.py that binds to 0.0.0.0 instead of 127.0.0.1
+      - ../mcp_servers/jellyseerr/main.py:/app/main.py:ro
+    ports:
+      - "${MCP_PORT:-5056}:${MCP_PORT:-5056}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', int(__import__('os').environ.get('PORT','5056')))); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - home-agent-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  home-agent-data:
+    name: home-agent-data
+
+networks:
+  home-agent-network:
+    name: home-agent-network

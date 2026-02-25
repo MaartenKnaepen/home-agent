@@ -22,6 +22,7 @@ asyncio_default_fixture_loop_scope = "function"
 dev = [
     "import-linter>=2.10",
     "ty>=0.0.17",
+    "pyyaml>=6.0",
 ]
 
 [tool.ty.rules]
@@ -73,8 +74,9 @@ forbidden_modules = [
     "home_agent.mcp",
 ]
 
-# Layer 2 — tools and mcp: no imports from agent, bot, main
-# Uncomment when home_agent.tools and home_agent.mcp exist
+# Layer 2 — mcp: no imports from agent, bot, main
+# NOTE: When home_agent.tools is created (step 1.9+), replace the active contract
+# below with this combined one that covers both tools and mcp together:
 # [[tool.importlinter.contracts]]
 # name = "tools and mcp do not import agent or bot"
 # type = "forbidden"
@@ -84,6 +86,16 @@ forbidden_modules = [
 #     "home_agent.bot",
 #     "home_agent.main",
 # ]
+
+[[tool.importlinter.contracts]]
+name = "mcp does not import agent or bot"
+type = "forbidden"
+source_modules = ["home_agent.mcp"]
+forbidden_modules = [
+    "home_agent.agent",
+    "home_agent.bot",
+    "home_agent.main",
+]
 
 # Layer 3 — agent and bot: no circular imports with each other or main
 [[tool.importlinter.contracts]]
@@ -99,5 +111,20 @@ forbidden_modules = [
 name = "bot does not import main"
 type = "forbidden"
 source_modules = ["home_agent.bot"]
+forbidden_modules = ["home_agent.main"]
+
+# Layer 4 — main: composition root; no other module should import it
+[[tool.importlinter.contracts]]
+name = "other modules do not import main"
+type = "forbidden"
+source_modules = [
+    "home_agent.config",
+    "home_agent.db",
+    "home_agent.profile",
+    "home_agent.history",
+    "home_agent.agent",
+    "home_agent.bot",
+    "home_agent.mcp",
+]
 forbidden_modules = ["home_agent.main"]
 

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from home_agent.agent import AgentDeps, agent
+from home_agent.agent import AgentDeps, create_agent, get_agent_toolsets
 from home_agent.config import AppConfig
 from home_agent.history import HistoryManager
 from home_agent.profile import ProfileManager, UserProfile
@@ -62,8 +62,9 @@ def make_agent_deps(
 
 def test_agent_instantiates() -> None:
     """Agent object exists and has the correct deps_type."""
-    assert agent is not None
-    assert agent.deps_type is AgentDeps
+    agent_instance = create_agent()
+    assert agent_instance is not None
+    assert agent_instance.deps_type is AgentDeps
 
 
 async def test_agent_has_update_user_note_tool(
@@ -74,10 +75,11 @@ async def test_agent_has_update_user_note_tool(
     history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
+    agent_instance = create_agent()
     m = TestModel()
-    with agent.override(model=m):
-        async with agent:
-            await agent.run("hello", deps=deps)
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("hello", deps=deps)
 
     assert m.last_model_request_parameters is not None
     tool_names = [t.name for t in m.last_model_request_parameters.function_tools]
@@ -94,10 +96,11 @@ async def test_system_prompt_contains_user_profile(
     history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
+    agent_instance = create_agent()
     m = TestModel()
-    with agent.override(model=m):
-        async with agent:
-            result = await agent.run("hello", deps=deps)
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            result = await agent_instance.run("hello", deps=deps)
 
     # The system prompt parts are embedded in the ModelRequest of all_messages()
     all_system_text = " ".join(
@@ -120,10 +123,11 @@ async def test_update_user_note_tool_persists_note(
     # Save the initial profile so ProfileManager.save() can update it
     await profile_manager.save(deps.user_profile)
 
+    agent_instance = create_agent()
     m = TestModel(call_tools=["update_user_note"])
-    with agent.override(model=m):
-        async with agent:
-            await agent.run("remember that I like sci-fi", deps=deps)
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("remember that I like sci-fi", deps=deps)
 
     # The profile in deps should have the note appended
     assert len(deps.user_profile.notes) > 0
@@ -141,9 +145,25 @@ async def test_agent_returns_output(
     history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
+    agent_instance = create_agent()
     m = TestModel(custom_output_text="Hello from the agent!")
-    with agent.override(model=m):
-        async with agent:
-            result = await agent.run("hi", deps=deps)
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            result = await agent_instance.run("hi", deps=deps)
 
     assert result.output == "Hello from the agent!"
+
+
+def test_get_agent_toolsets_delegates_to_registry() -> None:
+    """get_agent_toolsets() returns whatever registry.get_toolsets() returns."""
+    from unittest.mock import MagicMock
+
+    from home_agent.mcp.registry import MCPRegistry
+
+    mock_registry = MagicMock(spec=MCPRegistry)
+    mock_registry.get_toolsets.return_value = ["toolset_a", "toolset_b"]
+
+    result = get_agent_toolsets(mock_registry)
+
+    mock_registry.get_toolsets.assert_called_once()
+    assert result == ["toolset_a", "toolset_b"]

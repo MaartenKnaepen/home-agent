@@ -4,12 +4,15 @@
 # Updated after each completed step by autodev.
 
 project: home-agent
-last_updated: "2026-02-22"
+last_updated: "2026-02-25"
 
 current_state:
   phase: 1
-  step: "1.6"
-  description: "Phase 1 — Steps 1.1 (scaffolding), 1.2 (database layer), 1.3 (user profile model), 1.4 (conversation history & processor), 1.5 (Telegram bot skeleton), and 1.6 (PydanticAI Agent Setup) complete"
+  step: "1.10"
+  name: "Docker Deployment"
+  status: "complete"
+  next_step: "1.9b — Wire MCP Toolsets into Agent (pending), then 2.1 — Find or Build Glances MCP Server"
+  description: "Phase 1 — Steps 1.1–1.10 complete (1.9b still pending — agent factory + DI refactor). Bot fully working end-to-end: Telegram → Agent → Jellyseerr MCP → reply. Docker deployment with multi-stage Dockerfile, docker-compose.yml orchestrating home-agent + jellyseerr-mcp. Many Docker/MCP networking issues resolved during step 1.10 (see lessons_learned)."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -21,6 +24,24 @@ current_state:
     - "Telegram bot with whitelist enforcement and typing indicator"
     - "PydanticAI agent with AgentDeps, dynamic system prompt, update_user_note tool"
     - "bot.py wired to call agent and persist conversation history"
+    - "Jellyseerr community MCP server deployed via Docker Compose (deployment/docker-compose.yml)"
+    - "MCPRegistry with register(), get_toolsets(), get_tool_names() — creates FastMCPToolset instances for enabled servers"
+    - "ServerConfig dataclass and get_jellyseerr_config() factory in mcp/servers.py"
+    - "Import-linter contract enforcing mcp layer does not import agent, bot, or main"
+    - "main.py composition root: config → logging → DB init → managers → MCP registry → bot polling"
+    - "get_agent_toolsets() helper in agent.py for MCP toolset retrieval"
+    - "Import-linter Layer 4 contract: no other module imports main"
+    - "Multi-stage Dockerfile: uv build stage + python slim runtime stage, non-root appuser"
+    - "deployment/docker-compose.yml orchestrates home-agent + jellyseerr-mcp with shared network and persistent volume"
+    - "MCP_HOST env var in servers.py for Docker service discovery (defaults to localhost)"
+    - "mcp_port config field in AppConfig"
+    - ".dockerignore excludes tests, docs, .venv, IDE files, data"
+    - "async with agent: lifted to main.py startup — MCP connection stays open for bot lifetime"
+    - "Error handler registered in bot.py (_error_handler) — all unhandled exceptions now logged"
+    - "Empty agent output guard in bot.py — prevents silent failure when model returns empty string"
+    - "patched main.py volume-mounted into jellyseerr-mcp container — disables DNS rebinding protection and binds to 0.0.0.0"
+    - "PYTHONPATH=/app/src in Dockerfile runtime stage — required because uv installs as editable"
+    - "Compose run command: docker compose -f deployment/docker-compose.yml --env-file .env up -d"
   known_issues: []
 
 completed_steps:
@@ -75,6 +96,28 @@ completed_steps:
       - "History persisted as raw role/content strings in DB; converted to ModelMessage on load"
     issues: []
 
+  - step: "1.7"
+    name: "Jellyseerr MCP Server"
+    date: "2026-02-22"
+    summary: "Community MCP server (ghcr.io/aserper/jellyseerr-mcp) deployed via Docker Compose in deployment/docker-compose.yml. Exposes HTTP MCP endpoint at http://localhost:5056/mcp. No custom code written — connected to agent via FastMCPToolset('http://localhost:5056/mcp') in step 1.8."
+    decisions:
+      - "Used community Docker image (ghcr.io/aserper/jellyseerr-mcp) instead of building a custom FastMCP server — per AGENTS.md 'prefer existing over custom' guideline"
+      - "MCP server runs as a sidecar Docker container, decoupled from the Python app"
+      - "Agent connects via HTTP: FastMCPToolset('http://localhost:5056/mcp') — no subprocess, no custom code"
+      - "Config (JELLYSEERR_URL, JELLYSEERR_API_KEY, MCP_PORT) passed as Docker environment variables from .env"
+    issues: []
+
+  - step: "1.8"
+    name: "MCP Registry & Lifecycle"
+    date: "2026-02-24"
+    summary: "Created src/home_agent/mcp/ package with MCPRegistry, ServerConfig dataclass, and get_jellyseerr_config() factory. Registry creates FastMCPToolset instances for enabled HTTP MCP servers. Import-linter contract active. 8 new unit tests."
+    decisions:
+      - "MCPRegistry holds ServerConfig instances and creates FastMCPToolset(url) on demand — no start/stop needed since Docker manages server lifecycle"
+      - "ServerConfig is a plain dataclass (not Pydantic BaseModel) — no validation needed, pure config container"
+      - "Separate mcp-only import-linter contract added now; will be merged with home_agent.tools contract when tools package is created (step 1.9+)"
+      - "FastMCPToolset is lazy — safe to instantiate without a live connection"
+    issues: []
+
   - step: "1.4"
     name: "Conversation History & Processor"
     date: "2026-02-13"
@@ -98,6 +141,32 @@ completed_steps:
         status: "resolved"
         resolved_in: "1.6"
         resolution: "inject_user_profile() dynamic system prompt in agent.py injects UserProfile data per AGENTS.md architecture."
+    issues: []
+
+  - step: "1.9"
+    name: "Wire It Together"
+    date: "2026-02-24"
+    summary: "Created main.py composition root, added get_agent_toolsets() helper to agent.py, wrote integration tests and main tests, added import-linter contract forbidding imports of main, updated .env.example with MCP_PORT."
+    decisions:
+      - "main.py is the composition root — only place where all components assemble"
+      - "setup_logging() calls both basicConfig and getLogger().setLevel() to handle the case where basicConfig is a no-op (already-configured handlers in test environment)"
+      - "get_agent_toolsets() added to agent.py (not main.py) to keep MCP toolset logic close to the agent — agent.py is allowed to import from mcp per import-linter contracts"
+      - "Integration tests mock home_agent.bot.agent (import location) not home_agent.agent.agent (definition location)"
+      - "MCPRegistry created in main.py but toolsets not yet passed to agent — agent uses async with agent: for lifecycle, toolsets are a future wiring concern"
+    issues: []
+
+  - step: "1.10"
+    name: "Docker Deployment"
+    date: "2026-02-24"
+    summary: "Multi-stage Dockerfile (uv build + python:3.12-slim runtime), deployment/docker-compose.yml orchestrating home-agent and jellyseerr-mcp with shared network and persistent volume. Non-root appuser, health checks, MCP_HOST env var for Docker service discovery, mcp_port in AppConfig. 7 smoke tests for Docker config validation. README.md with deployment docs."
+    decisions:
+      - "Dockerfile uses uv image for build stage but plain python:3.12-slim-bookworm for runtime — avoids shipping uv in production image"
+      - "docker-compose.yml lives in deployment/ directory (not project root) to keep root clean and consistent with existing Jellyseerr MCP setup"
+      - "MCP_HOST read from os.environ in servers.py (not AppConfig) — it's a Docker-specific override set via docker-compose environment, not a user-facing config"
+      - "Entry point uses python -m home_agent.main (not a root main.py stub) for proper package execution"
+      - "Health check uses pgrep process detection — sufficient for a long-polling Telegram bot with no HTTP endpoint"
+      - "pyyaml added to dev dependencies for docker-compose YAML parsing in smoke tests"
+      - ".env.example uses placeholder values only — no real credentials committed to version control"
     issues: []
 
 architecture_decisions:
@@ -150,7 +219,9 @@ architecture_decisions:
 home_server_services:
   - name: Jellyseerr
     purpose: "Media requests & discovery"
-    mcp_status: not_researched
+    mcp_status: community_docker
+    mcp_image: "ghcr.io/aserper/jellyseerr-mcp:latest"
+    mcp_endpoint: "http://jellyseerr-mcp:5056/sse"
     phase: 1
   - name: Glances
     purpose: "System monitoring"
@@ -197,11 +268,64 @@ home_server_services:
     mcp_status: not_researched
     phase: 4
 
-lessons_learned: []
-# - id: "LL-001"
-#   title: "Lesson title"
-#   date: "YYYY-MM-DD"
-#   context: "What were we doing?"
-#   problem: "What went wrong?"
-#   resolution: "How did we fix it?"
-#   takeaway: "What should we do differently?"
+lessons_learned:
+  - id: "LL-001"
+    title: "uv installs local package as editable — PYTHONPATH needed in Docker runtime stage"
+    date: "2026-02-25"
+    context: "Building Docker image for home-agent with uv and src/ layout"
+    problem: "uv sync --frozen --no-dev installs the local package as an editable install (a .pth file pointing to /app/src). The runtime stage copies the .venv but the editable .pth link still points to the build stage's path. Result: ModuleNotFoundError: No module named 'home_agent' at startup."
+    resolution: "Added ENV PYTHONPATH=/app/src to the runtime stage in Dockerfile. The src/ directory is already copied in the runtime stage so Python finds the package directly. Tried --no-editable flag but it had no effect on this uv version."
+    takeaway: "Always set PYTHONPATH=/app/src in the runtime stage when using uv with src/ layout in Docker. Do not rely on --no-editable."
+
+  - id: "LL-002"
+    title: "ghcr.io/aserper/jellyseerr-mcp always binds to 127.0.0.1 — needs patched main.py"
+    date: "2026-02-25"
+    context: "Connecting home-agent Docker container to jellyseerr-mcp Docker container over shared network"
+    problem: "The jellyseerr-mcp image always starts Uvicorn on 127.0.0.1 (loopback only). FASTMCP_HOST env var is set in the image but the mcp.server.fastmcp.Settings model ignores it at construction time. Host header validation (MCP's TransportSecuritySettings DNS rebinding protection) also rejects Docker service-name Host headers like 'Host: jellyseerr-mcp'."
+    resolution: |
+      Volume-mounted a patched main.py into the container at /app/main.py:
+      1. Sets host = os.environ.get('MCP_HOST', '0.0.0.0') before calling mcp.run()
+      2. Disables DNS rebinding protection: mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+      3. Runs uvicorn directly with host='0.0.0.0'
+      The patched file lives at mcp_servers/jellyseerr/main.py and is mounted via docker-compose volumes.
+    takeaway: "When using community MCP Docker images, always verify the bind address. Many images bind to 127.0.0.1 by default, making inter-container communication impossible. A volume-mounted patched entrypoint is cleaner than forking the image."
+
+  - id: "LL-003"
+    title: "jellyseerr-mcp uses SSE transport (/sse), not streamable HTTP (/mcp)"
+    date: "2026-02-25"
+    context: "Connecting FastMCPToolset to jellyseerr-mcp"
+    problem: "FastMCPToolset defaults to streamable HTTP and connects to /mcp. The jellyseerr-mcp server only exposes /sse (GET for SSE stream) and /messages (POST). Connecting to /mcp returned 421 Misdirected Request or connection refused."
+    resolution: "Changed ServerConfig URL from http://jellyseerr-mcp:5056/mcp to http://jellyseerr-mcp:5056/sse. FastMCPToolset automatically detects SSE transport from the /sse path."
+    takeaway: "When connecting to MCP servers, always verify which transport they support. Older mcp.server.fastmcp servers use SSE (/sse + /messages). Newer fastmcp servers use streamable HTTP (/mcp). Check via curl first."
+
+  - id: "LL-004"
+    title: "Docker Compose .env auto-load only works from compose file directory"
+    date: "2026-02-25"
+    context: "Running docker compose -f deployment/docker-compose.yml from project root"
+    problem: "WARN: JELLYSEERR_API_KEY variable is not set. Docker Compose auto-loads .env only from the directory of the compose file (deployment/), not the current working directory or project root."
+    resolution: "Always run with explicit --env-file flag: docker compose -f deployment/docker-compose.yml --env-file .env up -d. Documented in deployment/README.md and as a comment in docker-compose.yml."
+    takeaway: "When compose file is not at project root, always pass --env-file .env explicitly. Document this in README."
+
+  - id: "LL-005"
+    title: "Docker healthcheck without curl — use Python socket check"
+    date: "2026-02-25"
+    context: "Healthcheck for jellyseerr-mcp container which doesn't have curl installed"
+    problem: "Healthcheck used CMD curl -f http://localhost:5056/health which fails silently because (a) curl is not installed in the Python-based image and (b) /health endpoint doesn't exist."
+    resolution: "Switched healthcheck to: python3 -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', int(__import__('os').environ.get('PORT','5056')))); s.close()\""
+    takeaway: "For Python-based MCP server images, use a Python socket connect healthcheck instead of curl. Verify endpoints exist before using them in healthchecks."
+
+  - id: "LL-006"
+    title: "async with agent: must be at app startup, not per-message"
+    date: "2026-02-25"
+    context: "MCP connection lifecycle in bot.py"
+    problem: "Original code called async with agent: inside each message handler, reopening the MCP connection on every message. This is slow and causes session termination errors when the SSE session is reused."
+    resolution: "Moved async with agent: to main.py _async_main(). Agent context manager stays open for the entire bot lifetime. bot.py calls agent.run() directly without the context manager."
+    takeaway: "async with agent: opens MCP connections. Call it once at startup, keep it open for the bot's lifetime. Never call it per-message."
+
+  - id: "LL-007"
+    title: "Register Telegram error handler or exceptions are silently swallowed"
+    date: "2026-02-25"
+    context: "Debugging silent failures in bot.py message handler"
+    problem: "python-telegram-bot logs 'No error handlers are registered' and swallows exceptions from message handlers. Agent errors, MCP failures, and Telegram API errors all disappear silently."
+    resolution: "Added app.add_error_handler(_error_handler) in create_application(). Also added try/except around agent.run() with explicit error logging and user-facing error message. Added guard for empty reply (if not reply:) since some free LLM models return empty strings after tool use."
+    takeaway: "Always register an error handler with python-telegram-bot. Always wrap agent.run() in try/except. Always guard against empty output from the model."

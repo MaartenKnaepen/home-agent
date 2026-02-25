@@ -1,0 +1,569 @@
+step: "1.7"
+name: "Jellyseerr MCP Server"
+phase: 1
+goal: "MCP server exposing Jellyseerr search and request capabilities."
+
+context:
+  description: |
+    Step 1.7 creates the MCP infrastructure for Jellyseerr integration. Instead of building
+    a custom MCP server, this step uses the existing community MCP server for Jellyseerr
+    (ghcr.io/aserper/jellyseerr-mcp) deployed via Docker.
+
+    The step creates:
+    - deployment/docker-compose.yml — Docker Compose file running the Jellyseerr MCP server
+    - src/home_agent/mcp/registry.py — MCPRegistry class for lifecycle management
+    - src/home_agent/mcp/servers.py — MCP server configurations (URLs, env vars)
+    - Updates to agent.py to connect the MCP server via FastMCPToolset
+
+    Per AGENTS.md, the MCP connection must use:
+    - FastMCPToolset from pydantic_ai.toolsets.fastmcp
+    - async with agent: for lifecycle management
+    - NOT the deprecated run_mcp_servers() or mcp_servers= parameter
+
+    The Jellyseerr MCP server exposes tools:
+    - search_media(query, media_type, limit) — Search for movies/TV shows
+    - get_media_details(media_id, media_type) — Get detailed info
+    - request_media(media_id, media_type, server_id) — Request/add to watchlist
+    - get_request_status(request_id) — Check request status
+
+    Docker deployment approach:
+    - MCP server runs as a separate container in deployment/docker-compose.yml
+    - Communicates via HTTP on localhost:5056 (or configurable port)
+    - Agent connects via FastMCPToolset("http://localhost:5056/mcp")
+  dependencies:
+    - "src/home_agent/config.py — JELLYSEERR_URL, JELLYSEERR_API_KEY settings"
+    - "src/home_agent/agent.py — Agent definition to wire MCP toolset"
+  references:
+    - "AGENTS.md — MCP Server Connection Template (p.3)"
+    - "AGENTS.md — PydanticAI Critical Rules (p.3)"
+    - "Jellyseerr MCP Server Docker image: ghcr.io/aserper/jellyseerr-mcp:latest"
+    - "https://github.com/aserper/jellyseerr-mcp — Community MCP server for Jellyseerr"
+
+tasks:
+  - id: 1
+    title: "Create deployment/docker-compose.yml for Jellyseerr MCP server"
+    file: "deployment/docker-compose.yml"
+    action: "create"
+    description: |
+      Create a Docker Compose file that runs the Jellyseerr MCP server container.
+
+      The container:
+      - Uses image: ghcr.io/aserper/jellyseerr-mcp:latest
+      - Exposes port 5056 (configurable via MCP_PORT env var)
+      - Receives JELLYSEERR_URL and JELLYSEERR_API_KEY from .env
+      - Uses host networking or port mapping to reach Jellyseerr
+
+      The compose file should:
+      - Define a 'jellyseerr-mcp' service
+      - Load env vars from .env file or environment
+      - Expose port 5056:5056 (or use env var for custom port)
+      - Set restart policy: unless-stopped
+      - Include health check (optional)
+
+      Note: The MCP server container needs to reach your Jellyseerr instance.
+      If Jellyseerr runs on the host, use host.docker.internal or --network=host.
+    code_snippet: |
+      services:
+        jellyseerr-mcp:
+          image: ghcr.io/aserper/jellyseerr-mcp:latest
+          container_name: jellyseerr-mcp
+          environment:
+            - JELLYSEERR_URL=${JELLYSEERR_URL:-http://host.docker.internal:5055}
+            - JELLYSEERR_API_KEY=${JELLYSEERR_API_KEY}
+            - PORT=${MCP_PORT:-5056}
+          ports:
+            - "${MCP_PORT:-5056}:${MCP_PORT:-5056}"
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:5056/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 10s
+    tests:
+      - "docker compose -f deployment/docker-compose.yml config validates successfully"
+      - "Container starts without errors"
+      - "Health endpoint responds at http://localhost:5056/health"
+
+  - id: 2
+    title: "Create .env.example entries for MCP server"
+    file: ".env.example"
+    action: "modify"
+    description: |
+      Update .env.example to include MCP server configuration:
+
+      - MCP_PORT — Port for MCP server HTTP endpoint (default 5056)
+      - JELLYSEERR_URL — Already exists, but ensure it uses host.docker.internal for Docker
+      - JELLYSEERR_API_KEY — Already exists
+
+      Add a comment explaining that when running Jellyseerr on the same host,
+      use host.docker.internal (Docker Desktop) or the host IP (Linux).
+    code_snippet: |
+      # Jellyseerr Configuration
+      JELLYSEERR_URL=http://host.docker.internal:5055
+      JELLYSEERR_API_KEY=your-jellyseerr-api-key
+
+      # MCP Server Configuration
+      MCP_PORT=5056
+    tests:
+      - ".env.example contains all required env vars"
+      - "Comments explain Docker networking for Jellyseerr URL"
+
+  - id: 3
+    title: "Create src/home_agent/mcp/__init__.py"
+    file: "src/home_agent/mcp/__init__.py"
+    action: "create"
+    description: |
+      Create the MCP package __init__.py to make it a proper Python package.
+
+      Export the main classes for easy importing:
+      - MCPRegistry from home_agent.mcp.registry
+      - ServerConfig from home_agent.mcp.servers (if applicable)
+    code_snippet: |
+      """MCP server registry and configuration for home-agent.
+
+      This package manages MCP server lifecycle (start/stop) and tool exposure to the agent.
+      """
+
+      from home_agent.mcp.registry import MCPRegistry
+
+      __all__ = ["MCPRegistry"]
+    tests:
+      - "from home_agent.mcp import MCPRegistry succeeds"
+
+  - id: 4
+    title: "Create src/home_agent/mcp/servers.py with Jellyseerr config"
+    file: "src/home_agent/mcp/servers.py"
+    action: "create"
+    description: |
+      Create the MCP server configuration module.
+
+      Define ServerConfig dataclass or Pydantic model with:
+      - name: str — Server identifier
+      - url: str — HTTP endpoint URL
+      - env: dict[str, str] — Environment variables for the server
+      - enabled: bool — Whether the server is active
+
+      Create get_jellyseerr_config() function that reads from AppConfig and returns
+      a ServerConfig for the Jellyseerr MCP server.
+
+      This module is the single source of truth for MCP server connection details.
+    code_snippet: |
+      """MCP server configurations.
+
+      Defines connection details for each MCP server (URL, env vars, enabled state).
+      """
+
+      from dataclasses import dataclass
+
+
+      @dataclass
+      class ServerConfig:
+          """Configuration for an MCP server.
+
+          Attributes:
+              name: Server identifier (e.g., 'jellyseerr').
+              url: HTTP endpoint URL for the MCP server.
+              env: Environment variables required by the server.
+              enabled: Whether this server is active.
+          """
+
+          name: str
+          url: str
+          env: dict[str, str]
+          enabled: bool = True
+
+
+      def get_jellyseerr_config(jellyseerr_url: str, jellyseerr_api_key: str) -> ServerConfig:
+          """Create Jellyseerr MCP server configuration.
+
+          Args:
+              jellyseerr_url: Jellyseerr instance URL.
+              jellyseerr_api_key: Jellyseerr API key.
+
+          Returns:
+              ServerConfig for the Jellyseerr MCP server.
+          """
+          return ServerConfig(
+              name="jellyseerr",
+              url="http://localhost:5056/mcp",
+              env={
+                  "JELLYSEERR_URL": jellyseerr_url,
+                  "JELLYSEERR_API_KEY": jellyseerr_api_key,
+              },
+              enabled=True,
+          )
+    tests:
+      - "test_mcp_servers.py — get_jellyseerr_config returns ServerConfig with correct url"
+      - "test_mcp_servers.py — ServerConfig has name='jellyseerr' and enabled=True"
+
+  - id: 5
+    title: "Create src/home_agent/mcp/registry.py with MCPRegistry class"
+    file: "src/home_agent/mcp/registry.py"
+    action: "create"
+    description: |
+      Create the MCPRegistry class that manages MCP server connections.
+
+      The registry:
+      - Holds ServerConfig instances for each MCP server
+      - Creates FastMCPToolset instances for each enabled server
+      - Exposes get_toolsets() method returning list of toolsets for the agent
+      - Handles lifecycle (start/stop) if needed for subprocess-based servers
+
+      For HTTP-based MCP servers (like Jellyseerr Docker container),
+      the registry simply creates FastMCPToolset("http://url/mcp") instances.
+
+      The registry is passed to the agent via AgentDeps or directly to toolsets param.
+    code_snippet: |
+      """MCP server registry and lifecycle management.
+
+      Manages MCP server connections and exposes toolsets to the agent.
+      """
+
+      from pydantic_ai.toolsets.fastmcp import FastMCPToolset
+
+      from home_agent.mcp.servers import ServerConfig
+
+
+      class MCPRegistry:
+          """Registry for MCP servers.
+
+          Manages server configurations and creates FastMCPToolset instances
+          for the PydanticAI agent.
+
+          Attributes:
+              servers: Dict mapping server names to ServerConfig instances.
+          """
+
+          def __init__(self) -> None:
+              """Initialize the MCP registry."""
+              self.servers: dict[str, ServerConfig] = {}
+
+          def register(self, config: ServerConfig) -> None:
+              """Register an MCP server configuration.
+
+              Args:
+                  config: Server configuration to register.
+              """
+              self.servers[config.name] = config
+
+          def get_toolsets(self) -> list[FastMCPToolset]:
+              """Create FastMCPToolset instances for all enabled servers.
+
+              Returns:
+                  List of FastMCPToolset instances for enabled servers.
+              """
+              toolsets = []
+              for server in self.servers.values():
+                  if server.enabled:
+                      toolset = FastMCPToolset(server.url)
+                      toolsets.append(toolset)
+              return toolsets
+
+          def get_tool_names(self) -> list[str]:
+              """Get list of enabled server names.
+
+              Returns:
+                  List of server names that are enabled.
+              """
+              return [s.name for s in self.servers.values() if s.enabled]
+    tests:
+      - "test_mcp_registry.py — Registry starts empty"
+      - "test_mcp_registry.py — register() adds server to registry"
+      - "test_mcp_registry.py — get_toolsets() returns FastMCPToolset for enabled servers"
+      - "test_mcp_registry.py — Disabled servers are excluded from toolsets"
+
+  - id: 6
+    title: "Update agent.py to include MCP toolsets"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      Update the agent definition to accept and use MCP toolsets.
+
+      The agent definition itself doesn't change much — the toolsets are passed
+      at runtime when using the agent. However, we need to:
+
+      1. Add MCPRegistry to AgentDeps (optional, for dynamic tool loading)
+      2. Document that the agent should be used with async with agent: context
+      3. Ensure the system prompt mentions Jellyseerr capabilities
+
+      Update the system prompt to mention:
+      - You can search for movies and TV shows via Jellyseerr
+      - You can request media to be added to watchlists
+      - You should confirm with the user before making requests
+
+      Also update AgentDeps to optionally include mcp_registry for future dynamic loading.
+    code_snippet: |
+      # Update the system_prompt in agent.py:
+      agent = Agent(
+          "openrouter:meta-llama/llama-3-8b-instruct:free",
+          deps_type=AgentDeps,
+          system_prompt=(
+              "You are a home server assistant that helps users control their home services "
+              "via natural language. You can search and request media through Jellyseerr, "
+              "monitor system stats via Glances, manage tasks, and more. "
+              "For media requests: always search first, show results to the user, and ask "
+              "for confirmation before requesting. Always ask for confirmation before "
+              "performing destructive actions like restarting containers or deleting files. "
+              "Be helpful, concise, and friendly."
+          ),
+      )
+    tests:
+      - "test_agent.py — System prompt mentions Jellyseerr capabilities"
+      - "test_agent.py — System prompt mentions confirmation requirement"
+
+  - id: 7
+    title: "Create tests/test_mcp_servers.py"
+    file: "tests/test_mcp_servers.py"
+    action: "create"
+    description: |
+      Create tests for the MCP servers configuration module.
+
+      Test cases:
+      1. test_get_jellyseerr_config_returns_server_config
+      2. test_jellyseerr_config_has_correct_url
+      3. test_jellyseerr_config_includes_env_vars
+
+      These are simple unit tests — no actual Docker or HTTP calls.
+    code_snippet: |
+      """Tests for MCP server configurations."""
+
+      from home_agent.mcp.servers import ServerConfig, get_jellyseerr_config
+
+
+      def test_get_jellyseerr_config_returns_server_config() -> None:
+          """get_jellyseerr_config returns a ServerConfig."""
+          config = get_jellyseerr_config(
+              jellyseerr_url="http://localhost:5055",
+              jellyseerr_api_key="test_key",
+          )
+          assert isinstance(config, ServerConfig)
+
+
+      def test_jellyseerr_config_has_correct_url() -> None:
+          """Jellyseerr config has expected MCP endpoint URL."""
+          config = get_jellyseerr_config(
+              jellyseerr_url="http://localhost:5055",
+              jellyseerr_api_key="test_key",
+          )
+          assert config.name == "jellyseerr"
+          assert config.url == "http://localhost:5056/mcp"
+          assert config.enabled is True
+
+
+      def test_jellyseerr_config_includes_env_vars() -> None:
+          """Jellyseerr config includes required env vars."""
+          config = get_jellyseerr_config(
+              jellyseerr_url="http://localhost:5055",
+              jellyseerr_api_key="test_key",
+          )
+          assert config.env["JELLYSEERR_URL"] == "http://localhost:5055"
+          assert config.env["JELLYSEERR_API_KEY"] == "test_key"
+    tests:
+      - "All tests pass with pytest"
+
+  - id: 8
+    title: "Create tests/test_mcp_registry.py"
+    file: "tests/test_mcp_registry.py"
+    action: "create"
+    description: |
+      Create tests for the MCPRegistry class.
+
+      Test cases:
+      1. test_registry_starts_empty
+      2. test_register_adds_server
+      3. test_get_toolsets_returns_toolsets
+      4. test_get_toolsets_excludes_disabled_servers
+      5. test_get_tool_names_returns_enabled_names
+
+      Mock FastMCPToolset to avoid actual HTTP connections.
+    code_snippet: |
+      """Tests for MCP registry."""
+
+      from unittest.mock import patch
+
+      from home_agent.mcp.registry import MCPRegistry
+      from home_agent.mcp.servers import ServerConfig
+
+
+      def test_registry_starts_empty() -> None:
+          """Registry starts with no servers."""
+          registry = MCPRegistry()
+          assert len(registry.servers) == 0
+
+
+      def test_register_adds_server() -> None:
+          """register() adds server to registry."""
+          registry = MCPRegistry()
+          config = ServerConfig(
+              name="jellyseerr",
+              url="http://localhost:5056/mcp",
+              env={},
+          )
+          registry.register(config)
+          assert len(registry.servers) == 1
+          assert "jellyseerr" in registry.servers
+
+
+      def test_get_toolsets_returns_toolsets() -> None:
+          """get_toolsets() returns FastMCPToolset instances."""
+          registry = MCPRegistry()
+          config = ServerConfig(
+              name="jellyseerr",
+              url="http://localhost:5056/mcp",
+              env={},
+              enabled=True,
+          )
+          registry.register(config)
+          with patch("home_agent.mcp.registry.FastMCPToolset") as mock_toolset:
+              toolsets = registry.get_toolsets()
+              assert len(toolsets) == 1
+              mock_toolset.assert_called_once_with("http://localhost:5056/mcp")
+
+
+      def test_get_toolsets_excludes_disabled_servers() -> None:
+          """get_toolsets() excludes disabled servers."""
+          registry = MCPRegistry()
+          registry.register(
+              ServerConfig(name="jellyseerr", url="http://localhost:5056/mcp", env={}, enabled=True)
+          )
+          registry.register(
+              ServerConfig(name="glances", url="http://localhost:5057/mcp", env={}, enabled=False)
+          )
+          toolsets = registry.get_toolsets()
+          assert len(toolsets) == 1
+          # Only jellyseerr (enabled) should be included
+
+
+      def test_get_tool_names_returns_enabled_names() -> None:
+          """get_tool_names() returns names of enabled servers."""
+          registry = MCPRegistry()
+          registry.register(
+              ServerConfig(name="jellyseerr", url="http://localhost:5056/mcp", env={}, enabled=True)
+          )
+          registry.register(
+              ServerConfig(name="glances", url="http://localhost:5057/mcp", env={}, enabled=False)
+          )
+          names = registry.get_tool_names()
+          assert names == ["jellyseerr"]
+    tests:
+      - "All tests pass with pytest"
+
+  - id: 9
+    title: "Update pyproject.toml import-linter contracts for mcp module"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Uncomment and update the import-linter contract for the mcp module.
+
+      The mcp module should not import agent, bot, or main (layer separation).
+      Add a contract that forbids home_agent.mcp from importing:
+      - home_agent.agent
+      - home_agent.bot
+      - home_agent.main
+
+      This ensures the MCP layer stays independent from the agent and bot layers.
+    code_snippet: |
+      [[tool.importlinter.contracts]]
+      name = "tools and mcp do not import agent or bot"
+      type = "forbidden"
+      source_modules = ["home_agent.tools", "home_agent.mcp"]
+      forbidden_modules = [
+          "home_agent.agent",
+          "home_agent.bot",
+          "home_agent.main",
+      ]
+    tests:
+      - "lint-imports passes with no forbidden import errors"
+
+  - id: 10
+    title: "Create deployment/README.md with usage instructions"
+    file: "deployment/README.md"
+    action: "create"
+    description: |
+      Create documentation for the deployment folder.
+
+      Include:
+      - How to start the Jellyseerr MCP server container
+      - How to configure .env with Jellyseerr URL and API key
+      - How to verify the MCP server is running (health check, logs)
+      - How to connect the agent to the MCP server
+      - Troubleshooting tips (Docker networking, API key issues)
+
+      Example commands:
+      - docker compose -f deployment/docker-compose.yml up -d
+      - docker logs jellyseerr-mcp
+      - curl http://localhost:5056/health
+    code_snippet: |
+      # Deployment
+
+      This folder contains Docker Compose configurations for MCP servers.
+
+      ## Jellyseerr MCP Server
+
+      ### Prerequisites
+
+      1. Jellyseerr instance running and accessible
+      2. Jellyseerr API key (get from Jellyseerr Settings > API)
+
+      ### Configuration
+
+      Copy `.env.example` to `.env` and set:
+
+      ```bash
+      JELLYSEERR_URL=http://host.docker.internal:5055
+      JELLYSEERR_API_KEY=your-api-key-here
+      MCP_PORT=5056
+      ```
+
+      **Note for Linux users:** If `host.docker.internal` doesn't work, use your host IP:
+      ```bash
+      JELLYSEERR_URL=http://172.17.0.1:5055
+      ```
+
+      ### Start the Server
+
+      ```bash
+      docker compose -f deployment/docker-compose.yml up -d
+      ```
+
+      ### Verify
+
+      Check logs:
+      ```bash
+      docker logs -f jellyseerr-mcp
+      ```
+
+      Health check:
+      ```bash
+      curl http://localhost:5056/health
+      ```
+
+      ### Connect Agent
+
+      The agent connects via `FastMCPToolset("http://localhost:5056/mcp")`.
+      See `src/home_agent/mcp/servers.py` for configuration.
+
+      ### Troubleshooting
+
+      **Connection refused to Jellyseerr:**
+      - Ensure JELLYSEERR_URL is correct
+      - Check if Jellyseerr is running
+      - Try `network_mode: host` in docker-compose.yml
+
+      **Invalid API key:**
+      - Regenerate API key in Jellyseerr Settings > API
+      - Restart the MCP container after changing the key
+    tests:
+      - "README.md exists and contains valid Markdown"
+      - "Commands are copy-paste ready"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Docker Compose file validates with 'docker compose config'"
+  - "Jellyseerr MCP server container starts without errors"
+  - "Health endpoint responds at http://localhost:5056/health"
+  - "MCPRegistry creates FastMCPToolset for Jellyseerr"
+  - "Import linter contract for mcp module activated and passing"
+  - "System prompt mentions Jellyseerr capabilities and confirmation requirement"

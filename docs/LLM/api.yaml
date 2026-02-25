@@ -12,6 +12,16 @@ modules:
         signature: "BaseSettings"
         description: "Application configuration loaded from environment variables via pydantic-settings."
 
+      - name: "AppConfig.llm_model"
+        type: "field"
+        signature: "str = 'openrouter:qwen/qwq-32b:free'"
+        description: "PydanticAI model string. Override via LLM_MODEL env var."
+
+      - name: "AppConfig.mcp_port"
+        type: "field"
+        signature: "int = 5056"
+        description: "Port number for the MCP server HTTP endpoint. Override via MCP_PORT env var."
+
       - name: "get_config"
         type: "function"
         signature: "() -> AppConfig"
@@ -109,35 +119,133 @@ modules:
         signature: "dataclass"
         description: "Dependencies injected into the agent at runtime: config, profile_manager, history_manager, user_profile."
 
-      - name: "agent"
-        type: "Agent"
-        signature: "Agent('openrouter:qwen/qwq-32b:free', deps_type=AgentDeps)"
-        description: "PydanticAI agent instance configured with OpenRouter free model, sliding-window history processor, and static+dynamic system prompt."
+      - name: "create_agent"
+        type: "function"
+        signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free') -> Agent[AgentDeps, str]"
+        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static+dynamic system prompt, and update_user_note tool."
 
       - name: "inject_user_profile"
         type: "function"
         signature: "async (ctx: RunContext[AgentDeps]) -> str"
-        description: "Dynamic system prompt that injects the current user's name, media preferences, and notes."
+        description: "Dynamic system prompt that injects the current user's name, media preferences, and notes. Registered inside create_agent()."
 
       - name: "update_user_note"
         type: "tool"
         signature: "async (ctx: RunContext[AgentDeps], note: str) -> str"
-        description: "Agent tool that appends a note to the user's profile and persists it via ProfileManager."
+        description: "Agent tool that appends a note to the user's profile and persists it via ProfileManager. Registered inside create_agent()."
+
+      - name: "get_agent_toolsets"
+        type: "function"
+        signature: "(registry: MCPRegistry) -> list[Any]"
+        description: "Get MCP toolsets from the registry for agent construction. Thin wrapper over registry.get_toolsets()."
 
   # ── src/home_agent/bot.py ──────────────────────────────────────────────────
   - module: "src/home_agent/bot.py"
     exports:
+      - name: "_error_handler"
+        type: "function"
+        signature: "async (update: object, context: ContextTypes.DEFAULT_TYPE) -> None"
+        description: "Telegram error handler that logs all unhandled exceptions. Registered on the Application via add_error_handler()."
+
       - name: "make_message_handler"
         type: "function"
-        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]"
-        description: "Create a Telegram message handler closure. Enforces whitelist, sends typing indicator, calls agent, persists conversation history."
+        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent[AgentDeps, str]) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]"
+        description: "Create a Telegram message handler closure. Enforces whitelist, sends typing indicator, calls agent.run() with try/except, guards against empty reply, persists conversation history."
 
       - name: "create_application"
         type: "function"
-        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager) -> Application"
-        description: "Build and return a configured Telegram Application with message handler wired. Does NOT start polling."
+        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent[AgentDeps, str]) -> Application"
+        description: "Build and return a configured Telegram Application with message handler and error handler wired. Does NOT start polling."
 
       - name: "run_bot"
         type: "function"
-        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager) -> None"
+        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent[AgentDeps, str]) -> None"
         description: "Build the Telegram application and start polling for updates. Blocks until stopped."
+
+  # ── src/home_agent/main.py ──────────────────────────────────────────────────
+  - module: "src/home_agent/main.py"
+    exports:
+      - name: "setup_logging"
+        type: "function"
+        signature: "(log_level: str) -> None"
+        description: "Configure root logger with the given level string (e.g. 'INFO', 'DEBUG')."
+
+      - name: "_async_main"
+        type: "function"
+        signature: "async () -> None"
+        description: "Async entry point. Initializes all components, opens MCP connections via async with agent:, starts Telegram bot polling. Blocks until interrupted."
+
+      - name: "main"
+        type: "function"
+        signature: "() -> None"
+        description: "Synchronous entry point. Calls asyncio.run(_async_main()) with KeyboardInterrupt handling."
+
+  # ── Dockerfile ───────────────────────────────────────────────────────────────
+  - module: "Dockerfile"
+    exports:
+      - name: "build"
+        type: "stage"
+        signature: "FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+        description: "Build stage: installs dependencies via uv sync --frozen --no-dev into .venv."
+
+      - name: "runtime"
+        type: "stage"
+        signature: "FROM python:3.12-slim-bookworm"
+        description: "Runtime stage: non-root appuser, copies .venv and src/ from build stage. Entry point: python -m home_agent.main. Health check via pgrep."
+
+  # ── deployment/docker-compose.yml ────────────────────────────────────────────
+  - module: "deployment/docker-compose.yml"
+    exports:
+      - name: "home-agent"
+        type: "service"
+        signature: "build: context: .., dockerfile: Dockerfile"
+        description: "Home agent bot container. Loads .env, sets MCP_HOST=jellyseerr-mcp for Docker networking, mounts home-agent-data volume at /app/data, depends on healthy jellyseerr-mcp."
+
+      - name: "jellyseerr-mcp"
+        type: "service"
+        signature: "image: ghcr.io/aserper/jellyseerr-mcp:latest"
+        description: "Community Jellyseerr MCP server with volume-mounted patched main.py (binds 0.0.0.0, disables DNS rebinding). SSE transport at /sse. Config via JELLYSEERR_URL, JELLYSEERR_API_KEY, MCP_PORT env vars. Health check via Python socket connect."
+
+  # ── src/home_agent/mcp/servers.py ───────────────────────────────────────
+  - module: "src/home_agent/mcp/servers.py"
+    exports:
+      - name: "ServerConfig"
+        type: "dataclass"
+        signature: "name: str, url: str, enabled: bool = True"
+        description: "Configuration for an MCP server with name, URL, and enabled state."
+
+      - name: "get_jellyseerr_config"
+        type: "function"
+        signature: "(mcp_port: int = 5056) -> ServerConfig"
+        description: "Create Jellyseerr MCP server configuration. Uses MCP_HOST env var (default 'localhost') for host and mcp_port for port. URL: http://{mcp_host}:{port}/sse."
+
+  # ── src/home_agent/mcp/registry.py ──────────────────────────────────────
+  - module: "src/home_agent/mcp/registry.py"
+    exports:
+      - name: "MCPRegistry"
+        type: "class"
+        signature: "__init__() -> None"
+        description: "Registry for MCP servers. Manages configurations and creates FastMCPToolset instances."
+
+      - name: "MCPRegistry.register"
+        type: "method"
+        signature: "(config: ServerConfig) -> None"
+        description: "Register an MCP server configuration."
+
+      - name: "MCPRegistry.get_toolsets"
+        type: "method"
+        signature: "() -> list[FastMCPToolset]"
+        description: "Create FastMCPToolset instances for all enabled servers."
+
+      - name: "MCPRegistry.get_tool_names"
+        type: "method"
+        signature: "() -> list[str]"
+        description: "Get list of enabled server names."
+
+  # ── mcp_servers/jellyseerr/main.py ─────────────────────────────────────────
+  - module: "mcp_servers/jellyseerr/main.py"
+    exports:
+      - name: "patched entrypoint"
+        type: "script"
+        signature: "__main__ with --transport sse"
+        description: "Volume-mounted replacement for jellyseerr-mcp container's main.py. Binds uvicorn to 0.0.0.0 (not 127.0.0.1) and disables MCP DNS rebinding protection so Docker service-name Host headers are accepted."
