@@ -246,7 +246,7 @@ phases:
       \ to use the factory or\n   inject a TestModel-overridden agent instance.\n\n\
       Key constraint: import-linter contracts must stay green. bot.py may not import\n\
       main.py. The agent flows main → bot, not bot → agent (singleton).\n"
-    status: pending
+    status: done
     test: '- test_agent.py — create_agent() returns Agent with correct toolsets registered
 
       - test_bot.py — make_message_handler() accepts agent parameter; handler calls
@@ -280,233 +280,190 @@ phases:
       - Container logs show successful Telegram connection
 
       '
-- focus: Add system monitoring via Glances MCP server.
+- focus: User experience, preferences, and conversational quality — the agent should
+    feel like it knows you.
   id: 2
-  name: Glances Integration
+  name: User Experience & Profile
   steps:
   - files:
-    - mcp_servers/glances/server.py
-    goal: MCP server exposing Glances system metrics.
+    - src/home_agent/profile.py
+    - tests/test_profile.py
+    goal: Profile model reflects what's actually used — quality per media type, reply
+      language, confirmation mode.
     id: '2.1'
-    name: Find or Build Glances MCP Server
-    notes: ''
-    scope: "- Search GitHub / MCP registries for existing Glances MCP server\n- Evaluate\
-      \ if it covers: CPU, memory, disk, network, per-container stats\n- If none found,\
-      \ build with FastMCP wrapping Glances REST API\n- Core tools: get_system_overview(),\
-      \ get_cpu(), get_memory(), get_disk(),\n  get_network(), get_containers()\n"
+    name: Simplify UserProfile
+    notes: 'See docs/LLM/plans/user-experience/ux-profile-and-confirmation.md for
+      full design rationale and sparring decisions.'
+    scope: "- Remove dead fields: preferred_genres, avoid_genres, preferred_language\
+      \ (media), NotificationPrefs, stats\n- Split quality: movie_quality and series_quality\
+      \ (Literal[\"4k\", \"1080p\"] | None)\n- Add reply_language: str = \"english\"\
+      \n- Add confirmation_mode: Literal[\"always\", \"never\"] = \"always\"\n- Migration:\
+      \ Pydantic ignores unknown fields on deserialize, removed fields disappear on\
+      \ next save\n"
     status: pending
-    test: '- test_glances_mcp.py — MCP server starts and lists expected tools
+    test: '- test_profile.py — Default profile has movie_quality=None, series_quality=None,
+      reply_language="english", confirmation_mode="always"
 
-      - get_system_overview returns structured CPU/mem/disk data against a mock Glances
-      API
+      - Profile with removed fields deserializes without error (migration)
 
-      - Handles Glances API being unreachable gracefully
+      - Profile round-trips through JSON with new fields intact
 
       '
   - files:
-    - src/home_agent/mcp/servers.py
-    goal: Glances MCP server loads alongside Jellyseerr on agent startup.
+    - src/home_agent/bot.py
+    - src/home_agent/profile.py
+    - tests/test_bot.py
+    - tests/test_profile.py
+    goal: New users get their reply language auto-detected from Telegram locale.
     id: '2.2'
-    name: Register Glances in MCP Registry
-    notes: ''
-    scope: '- Add Glances server config
+    name: Auto-detect Reply Language
+    notes: 'Telegram language_code is app language, not chat language — acceptable
+      because set_reply_language tool is the escape hatch.'
+    scope: "- bot.py passes update.effective_user.language_code to ProfileManager on\
+      \ first profile creation\n- Minimal mapping: nl → Dutch, en → English, fr →\
+      \ French, de → German, fallback → English\n- ProfileManager.get_or_create_profile()\
+      \ accepts optional language_code parameter\n"
+    status: pending
+    test: '- test_bot.py — New user with language_code="nl" gets profile with reply_language="Dutch"
 
-      - GLANCES_URL added to AppConfig
+      - New user with language_code=None gets reply_language="English"
 
-      - Registry starts both servers
+      - Existing user profile is not overwritten on subsequent messages
 
       '
+  - files:
+    - src/home_agent/config.py
+    - .env.example
+    - tests/test_config.py
+    goal: Admin configures Jellyseerr quality profile IDs without exposing them to users.
+    id: '2.3'
+    name: Admin Config for Quality Profiles
+    notes: 'Profile IDs are int | None = None. None means use Jellyseerr default profile.
+      Bot works out of the box without requiring admin to look up IDs.'
+    scope: "- Add jellyseerr_4k_profile_id: int | None = None to AppConfig\n- Add\
+      \ jellyseerr_1080p_profile_id: int | None = None to AppConfig\n- Pydantic field_validator:\
+      \ must be positive int if set\n- Add to .env.example with comments explaining\
+      \ how to find profile IDs\n"
     status: pending
-    test: '- test_mcp_registry.py (update) — Registry with two servers starts both
+    test: '- test_config.py — Config loads with profile IDs set
 
-      - Agent tool list includes both Jellyseerr and Glances tools
+      - Config loads with profile IDs unset (None)
+
+      - Negative profile ID raises ValidationError
+
+      '
+  - files:
+    - src/home_agent/tools/__init__.py
+    - src/home_agent/tools/profile_tools.py
+    - tests/test_profile_tools.py
+    goal: Agent can update user preferences via tool calls during conversation.
+    id: '2.4'
+    name: Profile Tools
+    notes: 'Tools are registered on the agent in agent.py. Each tool updates the profile
+      via ProfileManager and returns a confirmation string.'
+    scope: "- set_movie_quality(quality: Literal[\"4k\", \"1080p\"]) — stores preferred\
+      \ movie quality\n- set_series_quality(quality: Literal[\"4k\", \"1080p\"]) —\
+      \ stores preferred series quality\n- set_reply_language(language: str) — updates\
+      \ reply language (natural language names)\n- set_confirmation_mode(mode: Literal[\"\
+      always\", \"never\"]) — toggles confirmation\n- All tools use RunContext[AgentDeps]\
+      \ and return str\n- Import-linter: tools does not import agent, bot, or main\n"
+    status: pending
+    test: '- test_profile_tools.py — set_movie_quality updates profile and returns
+      confirmation
+
+      - set_reply_language("Dutch") updates profile.reply_language to "Dutch"
+
+      - set_confirmation_mode("never") updates profile.confirmation_mode
+
+      - All tools persist changes via ProfileManager
 
       '
   - files:
     - src/home_agent/agent.py
-    goal: Agent knows how to use system monitoring and formats stats readably.
-    id: '2.3'
-    name: System Prompt Update
-    notes: ''
-    scope: "- System prompt extended with monitoring capabilities and formatting guidance\n\
-      \  (e.g., use emoji for status indicators, warn if disk > 80%)\n"
+    - tests/test_agent.py
+    goal: Agent confirms before requesting, asks quality lazily, and replies in user's
+      language.
+    id: '2.5'
+    name: System Prompt & Confirmation Flow
+    notes: 'Confirmation, quality onboarding, and language are all system prompt behaviors.
+      No new code beyond prompt text and dynamic injection.'
+    scope: "- Static system prompt: confirmation policy (check confirmation_mode),\
+      \ search-then-confirm flow\n- Dynamic system prompt: inject movie_quality, series_quality\
+      \ (or \"NOT SET — ask\"), reply_language\n- Quality onboarding: if movie_quality\
+      \ is None and user requests a movie, ask \"4K or 1080p?\" first\n- Confirmation:\
+      \ show title + year + quality, wait for user OK before calling request_media\n\
+      - Language: \"Always reply in {profile.reply_language}\"\n"
     status: pending
-    test: "- test_agent.py (update) — Agent presented with \"how's my server?\" generates\
-      \ a\n  response that includes CPU/memory stats (mocked MCP)\n- Agent flags high\
-      \ disk usage when disk > 80%\n"
-- focus: 'Add MCP servers one at a time. Each follows the same pattern: find existing
-    → evaluate → connect → test.'
-  id: 3
-  name: Expand Services
-  steps:
-  - files: []
-    goal: Photo management via natural language.
-    id: '3.1'
-    name: Immich MCP Server
-    notes: ''
-    scope: '- Find existing MCP server
+    test: '- test_agent.py — Dynamic prompt includes "NOT SET" when quality is None
 
-      - Tools needed: search_photos(query, date_range), get_album_list(), get_storage_stats()
+      - Dynamic prompt includes "Always reply in Dutch" when language is Dutch
 
-      - System prompt update for photo-related queries
+      - Dynamic prompt includes confirmation policy based on confirmation_mode
 
-      '
-    status: pending
-    test: '- test_immich_mcp.py — Tools return structured data from mock API
-
-      - Search with date range filters correctly
-
-      - Agent responds to "show me photos from last weekend" with photo results
-
-      '
-  - files: []
-    goal: Recipe and meal plan management via natural language.
-    id: '3.2'
-    name: Mealie MCP Server
-    notes: ''
-    scope: "- Find existing MCP server\n- Tools needed: search_recipes(query), get_meal_plan(date),\n\
-      \  add_to_meal_plan(recipe_id, date), get_shopping_list()\n- System prompt update\n"
-    status: pending
-    test: '- test_mealie_mcp.py — Recipe search returns results
-
-      - Meal plan queries return structured daily plan
-
-      - Adding to meal plan sends correct request
-
-      '
-  - files: []
-    goal: Baby tracking via natural language.
-    id: '3.3'
-    name: BabyBuddy MCP Server
-    notes: ''
-    scope: "- Find existing MCP server\n- Tools needed: log_feeding(type, amount,\
-      \ time), log_diaper(type, time),\n  log_sleep(start, end), get_last_event(type),\
-      \ get_daily_summary()\n- System prompt update\n"
-    status: pending
-    test: '- test_babybuddy_mcp.py — Logging events sends correct data
-
-      - get_last_event("diaper") returns most recent entry
-
-      - Daily summary aggregates correctly
-
-      '
-  - files: []
-    goal: Document search and management via natural language.
-    id: '3.4'
-    name: Paperless-ngx MCP Server
-    notes: ''
-    scope: "- Find existing MCP server\n- Tools needed: search_documents(query), get_document(id),\n\
-      \  add_tag(doc_id, tag), get_tags()\n- System prompt update\n"
-    status: pending
-    test: '- test_paperless_mcp.py — Document search returns results with title, date,
-      tags
-
-      - Tag operations modify document metadata correctly
-
-      '
-  - files: []
-    goal: Task management via natural language.
-    id: '3.5'
-    name: Vikunja MCP Server
-    notes: ''
-    scope: "- Find existing MCP server\n- Tools needed: get_tasks(list, filter), create_task(title,\
-      \ list, due_date),\n  complete_task(id), get_lists()\n- System prompt update\n"
-    status: pending
-    test: '- test_vikunja_mcp.py — Task creation returns task with ID
-
-      - Listing tasks returns structured list
-
-      - Completing a task updates its status
-
-      '
-  - files: []
-    goal: Service uptime monitoring via natural language.
-    id: '3.6'
-    name: Uptime Kuma MCP Server
-    notes: ''
-    scope: '- Find existing MCP server
-
-      - Tools needed: get_monitors(), get_monitor_status(id), get_heartbeat(id)
-
-      - System prompt update
-
-      '
-    status: pending
-    test: '- test_uptimekuma_mcp.py — Monitor list returns all configured monitors
-      with status
-
-      - Heartbeat returns uptime percentage
-
-      - Agent responds to "is everything online?" with a summary
-
-      '
-  - files: []
-    goal: Docker container management via natural language.
-    id: '3.7'
-    name: Portainer MCP Server
-    notes: ''
-    scope: "- Find existing MCP server\n- Tools needed: list_containers(), get_container(name),\n\
-      \  restart_container(name), get_container_logs(name, lines)\n- System prompt\
-      \ update\n- Confirmation required for restart/stop actions\n"
-    status: pending
-    test: '- test_portainer_mcp.py — Container listing returns names and statuses
-
-      - Restart sends correct API call
-
-      - Agent asks for confirmation before restarting
-
-      '
-  - files: []
-    goal: Backup status monitoring via natural language.
-    id: '3.8'
-    name: Duplicati MCP Server
-    notes: ''
-    scope: '- Find existing MCP server
-
-      - Tools needed: list_backups(), get_backup_status(id), get_last_run(id)
-
-      - System prompt update
-
-      '
-    status: pending
-    test: '- test_duplicati_mcp.py — Backup listing returns backup jobs with last
-      run time
-
-      - Status shows healthy/warning/error state
+      - Agent with TestModel calls set_movie_quality tool when quality not set (custom_output_text)
 
       '
   - files:
-    - src/home_agent/mcp/registry.py
-    goal: Only load relevant MCP servers per conversation to reduce token cost.
-    id: '3.9'
-    name: Tool Filtering & Context-Aware Loading
-    notes: ''
-    scope: '- Classify incoming message to determine which MCP servers are relevant
-
-      - Lazy-connect only those servers for the agent call
-
-      - Disconnect idle servers after timeout
-
-      '
+    - src/home_agent/agent.py
+    - tests/test_agent.py
+    goal: When a search returns multiple versions of the same title (e.g. director's
+      cut, theatrical, remakes), the agent presents them as human-readable options
+      and asks the user to pick one before requesting.
+    id: '2.6'
+    name: Search Disambiguation
+    notes: 'The agent must never expose TMDB IDs, profile IDs, or other technical
+      identifiers to the user. Questions should be natural: "I found two versions —
+      Troy (2004) and Troy: Fall of a City (2018 TV series). Which one?" Disambiguation
+      applies to both movies and series. If only one result matches clearly, skip
+      straight to confirmation.'
+    scope: "- System prompt addition: when search_media returns multiple results,\
+      \ present a numbered list with title, year, and distinguishing details (director,\
+      \ cast, format)\n- Ask the user to pick by number or description\n- Only call\
+      \ request_media after the user selects a specific result AND confirms\n- Handle\
+      \ edge cases: exact title match skips disambiguation, user says \"the first\
+      \ one\", user changes mind\n- Works with the confirmation flow from step 2.5\
+      \ — disambiguation happens BEFORE confirmation\n"
     status: pending
-    test: '- test_tool_filtering.py — Message "search for a movie" only loads Jellyseerr
-      tools
+    test: '- test_agent.py — System prompt includes disambiguation instructions
 
-      - Message "how''s my server" only loads Glances tools
+      - test_agent.py — Agent with multiple search results asks user to choose (via
+      TestModel custom_output_text)
 
-      - Message "is everything online" only loads Uptime Kuma tools
-
-      - Ambiguous message loads all tools
+      - test_agent.py — Agent with single clear result skips to confirmation
 
       '
-- focus: Rich UX, proactive behavior, multi-user, and extended capabilities.
-  id: 4
+  - files:
+    - src/home_agent/agent.py
+    - src/home_agent/bot.py
+    - tests/test_agent.py
+    - tests/test_integration.py
+    goal: End-to-end verification that onboarding, confirmation, language switching,
+      and disambiguation work together.
+    id: '2.7'
+    name: Wire & Verify UX Flow
+    notes: ''
+    scope: "- Register profile tools on agent in create_agent()\n- Verify full flow:\
+      \ new user → auto-detect language → first movie request → quality onboarding\
+      \ → confirmation → request\n- Verify language switch: user says \"speak Dutch\"\
+      \ → agent calls set_reply_language → subsequent replies in Dutch\n- Verify skip-confirm:\
+      \ user sets confirmation_mode to \"never\" → agent requests immediately\n"
+    status: pending
+    test: '- test_integration.py — New user first request triggers quality question
+      before request_media
+
+      - test_integration.py — User with movie_quality set gets confirmation prompt
+
+      - test_integration.py — Language switch persists across messages
+
+      '
+- focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.
+  id: 3
   name: Polish & Advanced Features
   steps:
   - files:
     - src/home_agent/tools/telegram_tools.py
     goal: Responses use inline keyboards, images, and formatted text.
-    id: '4.1'
+    id: '3.1'
     name: Rich Telegram Formatting
     notes: ''
     scope: '- Agent tool to send inline keyboard buttons (e.g., confirm/deny)
@@ -528,7 +485,7 @@ phases:
   - files:
     - src/home_agent/notifications.py
     goal: Bot notifies user when downloads complete or issues arise.
-    id: '4.2'
+    id: '3.2'
     name: Proactive Notifications
     notes: ''
     scope: '- Periodic poller (or Jellyseerr webhook receiver) that checks for completed
@@ -551,7 +508,7 @@ phases:
     - src/home_agent/profile.py
     - src/home_agent/bot.py
     goal: Multiple users with separate profiles and permission levels.
-    id: '4.3'
+    id: '3.3'
     name: Multi-User Support
     notes: ''
     scope: '- Per-user profile isolation
@@ -572,7 +529,7 @@ phases:
   - files:
     - src/home_agent/bot.py
     goal: User sends voice message, agent processes it as text.
-    id: '4.4'
+    id: '3.4'
     name: Voice Message Support
     notes: ''
     scope: '- Voice message handler that downloads audio
@@ -592,7 +549,7 @@ phases:
       '
   - files: []
     goal: File conversion capabilities via natural language.
-    id: '4.5'
+    id: '3.5'
     name: IT Tools / BentoPDF / Vert Integration
     notes: ''
     scope: '- Find existing MCP servers
@@ -608,6 +565,225 @@ phases:
       - Conversion request sends correct payload
 
       - Agent handles unsupported format gracefully with a helpful message
+
+      '
+- focus: Add system monitoring via Glances MCP server.
+  id: 4
+  name: Glances Integration
+  steps:
+  - files:
+    - mcp_servers/glances/server.py
+    goal: MCP server exposing Glances system metrics.
+    id: '4.1'
+    name: Find or Build Glances MCP Server
+    notes: ''
+    scope: "- Search GitHub / MCP registries for existing Glances MCP server\n- Evaluate\
+      \ if it covers: CPU, memory, disk, network, per-container stats\n- If none found,\
+      \ build with FastMCP wrapping Glances REST API\n- Core tools: get_system_overview(),\
+      \ get_cpu(), get_memory(), get_disk(),\n  get_network(), get_containers()\n"
+    status: pending
+    test: '- test_glances_mcp.py — MCP server starts and lists expected tools
+
+      - get_system_overview returns structured CPU/mem/disk data against a mock Glances
+      API
+
+      - Handles Glances API being unreachable gracefully
+
+      '
+  - files:
+    - src/home_agent/mcp/servers.py
+    goal: Glances MCP server loads alongside Jellyseerr on agent startup.
+    id: '4.2'
+    name: Register Glances in MCP Registry
+    notes: ''
+    scope: '- Add Glances server config
+
+      - GLANCES_URL added to AppConfig
+
+      - Registry starts both servers
+
+      '
+    status: pending
+    test: '- test_mcp_registry.py (update) — Registry with two servers starts both
+
+      - Agent tool list includes both Jellyseerr and Glances tools
+
+      '
+  - files:
+    - src/home_agent/agent.py
+    goal: Agent knows how to use system monitoring and formats stats readably.
+    id: '4.3'
+    name: System Prompt Update
+    notes: ''
+    scope: "- System prompt extended with monitoring capabilities and formatting guidance\n\
+      \  (e.g., use emoji for status indicators, warn if disk > 80%)\n"
+    status: pending
+    test: "- test_agent.py (update) — Agent presented with \"how's my server?\" generates\
+      \ a\n  response that includes CPU/memory stats (mocked MCP)\n- Agent flags high\
+      \ disk usage when disk > 80%\n"
+- focus: 'Add MCP servers one at a time. Each follows the same pattern: find existing
+    → evaluate → connect → test.'
+  id: 5
+  name: Expand Services
+  steps:
+  - files: []
+    goal: Photo management via natural language.
+    id: '5.1'
+    name: Immich MCP Server
+    notes: ''
+    scope: '- Find existing MCP server
+
+      - Tools needed: search_photos(query, date_range), get_album_list(), get_storage_stats()
+
+      - System prompt update for photo-related queries
+
+      '
+    status: pending
+    test: '- test_immich_mcp.py — Tools return structured data from mock API
+
+      - Search with date range filters correctly
+
+      - Agent responds to "show me photos from last weekend" with photo results
+
+      '
+  - files: []
+    goal: Recipe and meal plan management via natural language.
+    id: '5.2'
+    name: Mealie MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: search_recipes(query), get_meal_plan(date),\n\
+      \  add_to_meal_plan(recipe_id, date), get_shopping_list()\n- System prompt update\n"
+    status: pending
+    test: '- test_mealie_mcp.py — Recipe search returns results
+
+      - Meal plan queries return structured daily plan
+
+      - Adding to meal plan sends correct request
+
+      '
+  - files: []
+    goal: Baby tracking via natural language.
+    id: '5.3'
+    name: BabyBuddy MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: log_feeding(type, amount,\
+      \ time), log_diaper(type, time),\n  log_sleep(start, end), get_last_event(type),\
+      \ get_daily_summary()\n- System prompt update\n"
+    status: pending
+    test: '- test_babybuddy_mcp.py — Logging events sends correct data
+
+      - get_last_event("diaper") returns most recent entry
+
+      - Daily summary aggregates correctly
+
+      '
+  - files: []
+    goal: Document search and management via natural language.
+    id: '5.4'
+    name: Paperless-ngx MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: search_documents(query), get_document(id),\n\
+      \  add_tag(doc_id, tag), get_tags()\n- System prompt update\n"
+    status: pending
+    test: '- test_paperless_mcp.py — Document search returns results with title, date,
+      tags
+
+      - Tag operations modify document metadata correctly
+
+      '
+  - files: []
+    goal: Task management via natural language.
+    id: '5.5'
+    name: Vikunja MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: get_tasks(list, filter), create_task(title,\
+      \ list, due_date),\n  complete_task(id), get_lists()\n- System prompt update\n"
+    status: pending
+    test: '- test_vikunja_mcp.py — Task creation returns task with ID
+
+      - Listing tasks returns structured list
+
+      - Completing a task updates its status
+
+      '
+  - files: []
+    goal: Service uptime monitoring via natural language.
+    id: '5.6'
+    name: Uptime Kuma MCP Server
+    notes: ''
+    scope: '- Find existing MCP server
+
+      - Tools needed: get_monitors(), get_monitor_status(id), get_heartbeat(id)
+
+      - System prompt update
+
+      '
+    status: pending
+    test: '- test_uptimekuma_mcp.py — Monitor list returns all configured monitors
+      with status
+
+      - Heartbeat returns uptime percentage
+
+      - Agent responds to "is everything online?" with a summary
+
+      '
+  - files: []
+    goal: Docker container management via natural language.
+    id: '5.7'
+    name: Portainer MCP Server
+    notes: ''
+    scope: "- Find existing MCP server\n- Tools needed: list_containers(), get_container(name),\n\
+      \  restart_container(name), get_container_logs(name, lines)\n- System prompt\
+      \ update\n- Confirmation required for restart/stop actions\n"
+    status: pending
+    test: '- test_portainer_mcp.py — Container listing returns names and statuses
+
+      - Restart sends correct API call
+
+      - Agent asks for confirmation before restarting
+
+      '
+  - files: []
+    goal: Backup status monitoring via natural language.
+    id: '5.8'
+    name: Duplicati MCP Server
+    notes: ''
+    scope: '- Find existing MCP server
+
+      - Tools needed: list_backups(), get_backup_status(id), get_last_run(id)
+
+      - System prompt update
+
+      '
+    status: pending
+    test: '- test_duplicati_mcp.py — Backup listing returns backup jobs with last
+      run time
+
+      - Status shows healthy/warning/error state
+
+      '
+  - files:
+    - src/home_agent/mcp/registry.py
+    goal: Only load relevant MCP servers per conversation to reduce token cost.
+    id: '5.9'
+    name: Tool Filtering & Context-Aware Loading
+    notes: ''
+    scope: '- Classify incoming message to determine which MCP servers are relevant
+
+      - Lazy-connect only those servers for the agent call
+
+      - Disconnect idle servers after timeout
+
+      '
+    status: pending
+    test: '- test_tool_filtering.py — Message "search for a movie" only loads Jellyseerr
+      tools
+
+      - Message "how''s my server" only loads Glances tools
+
+      - Message "is everything online" only loads Uptime Kuma tools
+
+      - Ambiguous message loads all tools
 
       '
 project: home-agent
