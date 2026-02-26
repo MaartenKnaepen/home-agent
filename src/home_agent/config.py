@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +22,10 @@ class AppConfig(BaseSettings):
         log_level: Logging level.
         llm_model: PydanticAI model string (e.g. openrouter:qwen/qwq-32b:free).
         mcp_port: Port number for the MCP server HTTP endpoint.
+        jellyseerr_4k_profile_id: Jellyseerr quality profile ID for 4K requests.
+            None means use Jellyseerr's default profile.
+        jellyseerr_1080p_profile_id: Jellyseerr quality profile ID for 1080p requests.
+            None means use Jellyseerr's default profile.
     """
 
     telegram_bot_token: SecretStr
@@ -33,11 +37,31 @@ class AppConfig(BaseSettings):
     log_level: str = "INFO"
     llm_model: str = "openrouter:qwen/qwq-32b:free"
     mcp_port: int = 5056
+    jellyseerr_4k_profile_id: int | None = None
+    jellyseerr_1080p_profile_id: int | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
     )
+
+    @field_validator("jellyseerr_4k_profile_id", "jellyseerr_1080p_profile_id")
+    @classmethod
+    def validate_profile_id(cls, v: int | None) -> int | None:
+        """Validate that profile IDs are positive integers when set.
+
+        Args:
+            v: The profile ID value to validate.
+
+        Returns:
+            The validated profile ID, or None.
+
+        Raises:
+            ValueError: If the profile ID is not a positive integer.
+        """
+        if v is not None and v <= 0:
+            raise ValueError("Jellyseerr profile ID must be a positive integer")
+        return v
 
 
 @lru_cache

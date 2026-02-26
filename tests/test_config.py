@@ -1,4 +1,5 @@
 import os
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -38,3 +39,44 @@ def test_singleton_pattern(mock_env):
     config1 = get_config()
     config2 = get_config()
     assert id(config1) == id(config2)
+
+
+def test_quality_profile_ids_default_to_none(mock_env: None) -> None:
+    """Quality profile IDs default to None when not set."""
+    config = AppConfig()
+    assert config.jellyseerr_4k_profile_id is None
+    assert config.jellyseerr_1080p_profile_id is None
+
+
+def test_quality_profile_ids_load_from_env(mock_env: None) -> None:
+    """Quality profile IDs load correctly from environment variables."""
+    with patch.dict(os.environ, {"JELLYSEERR_4K_PROFILE_ID": "7", "JELLYSEERR_1080P_PROFILE_ID": "6"}):
+        config = AppConfig()
+        assert config.jellyseerr_4k_profile_id == 7
+        assert config.jellyseerr_1080p_profile_id == 6
+
+
+def test_negative_profile_id_raises_validation_error(mock_env: None) -> None:
+    """Negative profile IDs raise ValidationError."""
+    with pytest.raises(ValidationError):
+        AppConfig(
+            _env_file=None,
+            telegram_bot_token="fake",
+            openrouter_api_key="fake",
+            jellyseerr_api_key="fake",
+            allowed_telegram_ids=[123],
+            jellyseerr_4k_profile_id=-1,
+        )
+
+
+def test_zero_profile_id_raises_validation_error(mock_env: None) -> None:
+    """Zero profile ID raises ValidationError."""
+    with pytest.raises(ValidationError):
+        AppConfig(
+            _env_file=None,
+            telegram_bot_token="fake",
+            openrouter_api_key="fake",
+            jellyseerr_api_key="fake",
+            allowed_telegram_ids=[123],
+            jellyseerr_1080p_profile_id=0,
+        )

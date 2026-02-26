@@ -8,11 +8,11 @@ last_updated: "2026-02-27"
 
 current_state:
   phase: 2
-  step: "2.2"
-  name: "Auto-detect Reply Language"
+  step: "2.3"
+  name: "Admin Config for Quality Profiles"
   status: "complete"
-  next_step: "2.3 — Admin Config for Quality Profiles"
-  description: "Step 2.2 complete — New users get reply_language auto-detected from Telegram locale. resolve_language() maps locale codes (nl→Dutch, en→English, fr→French, de→German, es→Spanish) with English fallback. ProfileManager.get() accepts optional language_code kwarg, used only on first profile creation. bot.py reads update.effective_user.language_code and passes it through. UserProfile.reply_language default capitalized to 'English' for consistency."
+  next_step: "2.4 — Profile Tools"
+  description: "Step 2.3 complete — Added jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id (int | None = None) to AppConfig. Pydantic field_validator rejects zero and negative values. .env.example updated with commented-out examples and instructions for finding IDs in Jellyseerr settings."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -46,6 +46,7 @@ current_state:
     - "Old profiles with removed fields (NotificationPrefs, stats, old MediaPreferences) migrate seamlessly on next load/save"
     - "Auto-detect reply language from Telegram locale on first profile creation (resolve_language in profile.py)"
     - "ProfileManager.get() accepts language_code kwarg — only used for new user creation, existing profiles unaffected"
+    - "AppConfig has jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id (int | None = None) with positive-int validation"
   known_issues: []
 
 completed_steps:
@@ -179,6 +180,16 @@ completed_steps:
       - "language_code is keyword-only arg on ProfileManager.get() to avoid breaking existing callers"
       - "Existing profiles are never modified when language_code is passed — only affects new user creation"
       - "UserProfile.reply_language default changed from 'english' to 'English' for consistency with resolve_language() output"
+    issues: []
+
+  - step: "2.3"
+    name: "Admin Config for Quality Profiles"
+    date: "2026-02-27"
+    summary: "Added jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id (int | None = None) to AppConfig with field_validator rejecting zero and negative values. .env.example updated with commented-out examples and instructions for finding IDs in Jellyseerr settings."
+    decisions:
+      - "Both fields default to None — bot works out of the box without requiring admin to look up profile IDs"
+      - "Zero is rejected alongside negative values — Jellyseerr profile IDs are always positive integers"
+      - "Validator covers both fields with a single @field_validator decorator"
     issues: []
 
   - step: "1.10"

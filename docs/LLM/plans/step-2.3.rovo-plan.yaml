@@ -1,0 +1,151 @@
+step: "2.3"
+name: "Admin Config for Quality Profiles"
+phase: 2
+goal: "Admin configures Jellyseerr quality profile IDs without exposing them to users."
+
+context:
+  description: |
+    Step 2.3 adds admin-level configuration for Jellyseerr quality profile IDs.
+    These IDs tell Jellyseerr which quality profile to use when requesting media
+    (e.g., 4K profile vs 1080p profile). The IDs are admin-only settings — users
+    select "4k" or "1080p" in conversation, but the actual Jellyseerr profile ID
+    mapping is configured by the admin in .env.
+    
+    The config fields are Optional[int] with default None. When None, Jellyseerr's
+    default profile is used. This means the bot works out of the box without requiring
+    admins to look up profile IDs — they can add them later if needed.
+  dependencies:
+    - "src/home_agent/config.py — AppConfig with new quality profile ID fields"
+    - ".env.example — documentation for admins on how to find and set profile IDs"
+    - "tests/test_config.py — validation tests for profile ID fields"
+  references:
+    - "docs/LLM/implementation.yaml step 2.3 — scope and test criteria"
+    - "AGENTS.md section 4 — Configuration & Logging patterns"
+    - "Jellyseerr API docs — quality profiles are numeric IDs"
+
+tasks:
+  - id: 1
+    title: "Add quality profile ID fields to AppConfig"
+    file: "src/home_agent/config.py"
+    action: "modify"
+    description: |
+      Add two new optional fields to AppConfig:
+      - jellyseerr_4k_profile_id: int | None = None
+      - jellyseerr_1080p_profile_id: int | None = None
+      
+      Add a field_validator to ensure that if set, the values must be positive integers.
+      None means "use Jellyseerr default profile" — bot works without these being set.
+    code_snippet: |
+      from pydantic import Field, SecretStr, field_validator
+      from pydantic_settings import BaseSettings, SettingsConfigDict
+      
+      
+      class AppConfig(BaseSettings):
+          # ... existing fields ...
+          jellyseerr_4k_profile_id: int | None = None
+          jellyseerr_1080p_profile_id: int | None = None
+          
+          model_config = SettingsConfigDict(
+              env_file=".env",
+              env_file_encoding="utf-8",
+          )
+          
+          @field_validator("jellyseerr_4k_profile_id", "jellyseerr_1080p_profile_id")
+          @classmethod
+          def validate_profile_id(cls, v: int | None) -> int | None:
+              """Validate that profile IDs are positive integers if set."""
+              if v is not None and v <= 0:
+                  raise ValueError("Profile ID must be a positive integer if set")
+              return v
+    tests:
+      - "test_config.py — Config loads with profile IDs set to positive integers"
+      - "test_config.py — Config loads with profile IDs unset (None)"
+      - "test_config.py — Negative profile ID raises ValidationError"
+      - "test_config.py — Zero profile ID raises ValidationError"
+
+  - id: 2
+    title: "Update .env.example with quality profile ID documentation"
+    file: ".env.example"
+    action: "modify"
+    description: |
+      Add the new quality profile ID fields to .env.example with comments explaining:
+      1. What they are for (Jellyseerr quality profile mapping)
+      2. How to find the profile IDs in Jellyseerr admin panel
+      3. That None (commented out) means use Jellyseerr default
+      
+      Example format:
+      # Jellyseerr Quality Profile IDs (optional — comment out to use Jellyseerr default)
+      # To find profile IDs: Settings → 4K/HD Profiles → note the ID number
+      # JELLYSEERR_4K_PROFILE_ID=1
+      # JELLYSEERR_1080P_PROFILE_ID=2
+    code_snippet: |
+      # Jellyseerr Quality Profile IDs (optional)
+      # These map user quality choices ("4k", "1080p") to Jellyseerr profile IDs.
+      # To find profile IDs: Open Jellyseerr → Settings → 4K/HD Profiles → note the ID number.
+      # If unset (commented out), Jellyseerr uses its default profile for that quality.
+      #JELLYSEERR_4K_PROFILE_ID=1
+      #JELLYSEERR_1080P_PROFILE_ID=2
+    tests:
+      - ".env.example contains JELLYSEERR_4K_PROFILE_ID and JELLYSEERR_1080P_PROFILE_ID"
+      - "Comments explain how to find profile IDs in Jellyseerr"
+
+  - id: 3
+    title: "Update test_config.py for profile ID validation"
+    file: "tests/test_config.py"
+    action: "modify"
+    description: |
+      Add tests for the new quality profile ID fields:
+      1. Test config loads with both profile IDs set
+      2. Test config loads with both profile IDs unset (None default)
+      3. Test negative profile ID raises ValidationError
+      4. Test zero profile ID raises ValidationError
+    code_snippet: |
+      def test_config_loads_with_profile_ids_set():
+          """Config loads correctly when quality profile IDs are set."""
+          os.environ["JELLYSEERR_4K_PROFILE_ID"] = "1"
+          os.environ["JELLYSEERR_1080P_PROFILE_ID"] = "2"
+          
+          config = AppConfig()
+          
+          assert config.jellyseerr_4k_profile_id == 1
+          assert config.jellyseerr_1080p_profile_id == 2
+      
+      def test_config_loads_with_profile_ids_unset():
+          """Config loads with None defaults when profile IDs are not set."""
+          # Ensure env vars are not set
+          os.environ.pop("JELLYSEERR_4K_PROFILE_ID", None)
+          os.environ.pop("JELLYSEERR_1080P_PROFILE_ID", None)
+          
+          config = AppConfig()
+          
+          assert config.jellyseerr_4k_profile_id is None
+          assert config.jellyseerr_1080p_profile_id is None
+      
+      def test_negative_profile_id_raises_validation_error():
+          """Negative profile ID raises ValidationError."""
+          os.environ["JELLYSEERR_4K_PROFILE_ID"] = "-1"
+          
+          with pytest.raises(ValidationError):
+              AppConfig()
+      
+      def test_zero_profile_id_raises_validation_error():
+          """Zero profile ID raises ValidationError."""
+          os.environ["JELLYSEERR_4K_PROFILE_ID"] = "0"
+          
+          with pytest.raises(ValidationError):
+              AppConfig()
+    tests:
+      - "All new profile ID validation tests pass"
+      - "Existing config tests still pass"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "AppConfig has jellyseerr_4k_profile_id: int | None = None field"
+  - "AppConfig has jellyseerr_1080p_profile_id: int | None = None field"
+  - "field_validator ensures profile IDs are positive integers if set"
+  - "Config loads with profile IDs set to positive integers"
+  - "Config loads with profile IDs unset (None)"
+  - "Negative profile ID raises ValidationError"
+  - ".env.example contains JELLYSEERR_4K_PROFILE_ID and JELLYSEERR_1080P_PROFILE_ID with comments"
+  - "Comments explain how to find profile IDs in Jellyseerr admin panel"

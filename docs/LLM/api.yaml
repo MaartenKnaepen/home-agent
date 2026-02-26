@@ -22,6 +22,21 @@ modules:
         signature: "int = 5056"
         description: "Port number for the MCP server HTTP endpoint. Override via MCP_PORT env var."
 
+      - name: "AppConfig.jellyseerr_4k_profile_id"
+        type: "field"
+        signature: "int | None = None"
+        description: "Jellyseerr quality profile ID for 4K requests. None means use Jellyseerr's default profile. Must be a positive integer if set."
+
+      - name: "AppConfig.jellyseerr_1080p_profile_id"
+        type: "field"
+        signature: "int | None = None"
+        description: "Jellyseerr quality profile ID for 1080p requests. None means use Jellyseerr's default profile. Must be a positive integer if set."
+
+      - name: "AppConfig.validate_profile_id"
+        type: "validator"
+        signature: "(cls, v: int | None) -> int | None"
+        description: "Pydantic field_validator for jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id. Rejects zero and negative values."
+
       - name: "get_config"
         type: "function"
         signature: "() -> AppConfig"

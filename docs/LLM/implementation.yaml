@@ -344,7 +344,7 @@ phases:
       \ jellyseerr_1080p_profile_id: int | None = None to AppConfig\n- Pydantic field_validator:\
       \ must be positive int if set\n- Add to .env.example with comments explaining\
       \ how to find profile IDs\n"
-    status: pending
+    status: done
     test: '- test_config.py — Config loads with profile IDs set
 
       - Config loads with profile IDs unset (None)
