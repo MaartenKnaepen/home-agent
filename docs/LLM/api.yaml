@@ -168,12 +168,12 @@ modules:
       - name: "create_agent"
         type: "function"
         signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free') -> Agent[AgentDeps, str]"
-        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static+dynamic system prompt, update_user_note tool, and 4 profile tools (set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode)."
+        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static system prompt (## Media Requests with SEARCH→DISAMBIGUATE→QUALITY→CONFIRM flow, ## Language, ## Preferences), dynamic system prompt (## Current User Context), update_user_note tool, and 4 profile tools."
 
       - name: "inject_user_profile"
         type: "function"
         signature: "async (ctx: RunContext[AgentDeps]) -> str"
-        description: "Dynamic system prompt that injects the current user's name, media preferences, and notes. Registered inside create_agent()."
+        description: "Dynamic system prompt that injects '## Current User Context' block with name, reply_language, confirmation_mode, movie/series quality (or 'NOT SET'), and notes. Registered inside create_agent()."
 
       - name: "update_user_note"
         type: "tool"

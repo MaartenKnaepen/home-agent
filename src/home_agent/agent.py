@@ -67,7 +67,46 @@ def create_agent(
             "You are a helpful home server assistant. "
             "You help the user manage their home server services including media, monitoring, and more. "
             "Always be concise and friendly. "
-            "For destructive or irreversible actions, always ask for confirmation before proceeding."
+            "\n\n"
+            "## Media Requests\n"
+            "When the user asks to download, add, or request a movie or TV series:\n"
+            "1. SEARCH FIRST: Always call search_media before requesting. Never guess a media ID.\n"
+            "2. DISAMBIGUATE: When search returns results:\n"
+            "   - If there is only ONE clear match (same title, year, and type as requested): "
+            "skip straight to step 3 (QUALITY).\n"
+            "   - If there are MULTIPLE results: present them as a numbered list. "
+            "Include title, year, type (movie/series), and ONE distinguishing detail "
+            "(director, lead actor, or brief description). Keep it concise.\n"
+            "   - NEVER expose TMDB IDs, media IDs, or any technical identifiers to the user.\n"
+            "   - Use natural language, not database terms.\n"
+            "   Example (multiple results):\n"
+            "     'I found a few options:\n"
+            "     1. Troy (2004) — epic war film with Brad Pitt\n"
+            "     2. Troy: Fall of a City (2018) — TV mini-series\n"
+            "     Which one would you like?'\n"
+            "   - If the user says 'the first one', 'number 2', or similar: accept it and proceed.\n"
+            "   - If the user changes their mind after picking: restart from search.\n"
+            "   - For sequels and franchises: always ask which one unless the user was specific "
+            "(e.g. 'The Matrix Reloaded' is specific; 'The Matrix' is ambiguous if there are multiple entries).\n"
+            "3. QUALITY: Before requesting, check the user's quality preference from your context. "
+            "If movie_quality is NOT SET and the user wants a movie, ask: "
+            "'Do you prefer 4K or 1080p for movies?' and call set_movie_quality with their answer. "
+            "If series_quality is NOT SET and the user wants a series, ask: "
+            "'Do you prefer 4K or 1080p for series?' and call set_series_quality with their answer.\n"
+            "4. CONFIRM: When confirmation_mode is 'always', always confirm before calling "
+            "request_media. Show the exact title, year, and quality you will request. "
+            "Only proceed after the user says yes.\n"
+            "   Example: 'I found Troy (2004). Request it in 4K?'\n"
+            "   When confirmation_mode is 'never', skip confirmation and request immediately.\n"
+            "\n"
+            "## Language\n"
+            "Always reply in the language specified in your context (reply_language). "
+            "If the user asks you to switch language, call set_reply_language with the new language "
+            "name (e.g. 'Dutch', 'French') and switch immediately in your next reply.\n"
+            "\n"
+            "## Preferences\n"
+            "If the user expresses preferences, habits, or personal details worth remembering, "
+            "call update_user_note to record them for future conversations."
         ),
     )
 
@@ -79,22 +118,46 @@ def create_agent(
             ctx: Runtime context with dependencies.
 
         Returns:
-            A string fragment to append to the system prompt.
+            A string fragment appended to the system prompt before each request.
         """
         profile = ctx.deps.user_profile
-        name_part = f"The user's name is {profile.name}." if profile.name else "The user has not set a name."
         prefs = profile.media_preferences
-        movie_q = prefs.movie_quality or "NOT SET — ask before first movie request"
-        series_q = prefs.series_quality or "NOT SET — ask before first series request"
-        notes_part = ("Notes about this user: " + "; ".join(profile.notes)) if profile.notes else ""
-        return (
-            f"{name_part} "
-            f"Always reply in {profile.reply_language}. "
-            f"Confirmation mode: {profile.confirmation_mode}. "
-            f"Movie quality preference: {movie_q}. "
-            f"Series quality preference: {series_q}. "
-            f"{notes_part}"
-        ).strip()
+
+        name_part = (
+            f"The user's name is {profile.name}."
+            if profile.name
+            else "The user has not set a name."
+        )
+
+        movie_q = (
+            prefs.movie_quality
+            if prefs.movie_quality
+            else "NOT SET — ask the user before making any movie request"
+        )
+        series_q = (
+            prefs.series_quality
+            if prefs.series_quality
+            else "NOT SET — ask the user before making any series request"
+        )
+
+        notes_part = (
+            "Notes about this user: " + "; ".join(profile.notes)
+            if profile.notes
+            else ""
+        )
+
+        parts = [
+            "## Current User Context",
+            name_part,
+            f"Reply language: {profile.reply_language} — always use this language.",
+            f"Confirmation mode: {profile.confirmation_mode}.",
+            f"Movie quality preference: {movie_q}.",
+            f"Series quality preference: {series_q}.",
+        ]
+        if notes_part:
+            parts.append(notes_part)
+
+        return "\n".join(parts)
 
     @agent_instance.tool
     async def update_user_note(ctx: RunContext[AgentDeps], note: str) -> str:

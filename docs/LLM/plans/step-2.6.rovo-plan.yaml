@@ -1,0 +1,383 @@
+step: "2.6"
+name: "Search Disambiguation"
+phase: 2
+goal: "When search returns multiple versions, agent presents human-readable options and asks user to pick one."
+
+context:
+  description: |
+    Step 2.6 adds search disambiguation to the agent's behavior. When search_media
+    returns multiple results (e.g., director's cut vs theatrical, remakes, TV series
+    vs movie), the agent must present them as human-readable options and ask the
+    user to pick one before proceeding to confirmation and request.
+    
+    Key principles:
+    - Never expose TMDB IDs, profile IDs, or technical identifiers
+    - Use natural language: "I found two versions — Troy (2004) and Troy: Fall of a
+      City (2018 TV series). Which one?"
+    - Disambiguation happens BEFORE confirmation (step 2.5)
+    - If only one clear result, skip straight to confirmation
+    
+    This step also refactors the system prompt into a Jinja2 template file for
+    better maintainability and separation of concerns.
+  dependencies:
+    - "src/home_agent/agent.py — current system prompt in create_agent()"
+    - "src/home_agent/profile.py — UserProfile structure"
+    - "tests/test_agent.py — existing agent tests"
+    - "pyproject.toml — add Jinja2 dependency"
+  references:
+    - "docs/LLM/implementation.yaml step 2.6 — scope and test criteria"
+    - "AGENTS.md section 1 — Agent Definition Template"
+    - "Jinja2 docs — template rendering patterns"
+
+tasks:
+  - id: 1
+    title: "Add Jinja2 dependency to pyproject.toml"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Add Jinja2 as a runtime dependency for template-based system prompt rendering.
+      This enables cleaner separation of prompt text from Python code.
+    code_snippet: |
+      [project]
+      name = "home-agent"
+      version = "0.1.0"
+      description = "Add your description here"
+      readme = "README.md"
+      requires-python = ">=3.10"
+      dependencies = [
+          "pydantic-settings",
+          "pytest>=9.0.2",
+          "aiosqlite",
+          "pytest-asyncio",
+          "pydantic-ai>=1.62.0",
+          "python-telegram-bot>=21.6",
+          "jinja2>=3.1.2",
+      ]
+    tests:
+      - "uv sync succeeds without errors"
+      - "jinja2 can be imported in Python"
+
+  - id: 2
+    title: "Create system prompt Jinja2 template"
+    file: "src/home_agent/prompts/system_prompt.jinja2"
+    action: "create"
+    description: |
+      Create a Jinja2 template file for the system prompt. This separates the
+      prompt text from Python code, making it easier to edit and version.
+      
+      The template receives:
+      - user_name: str | None
+      - reply_language: str
+      - confirmation_mode: Literal["always", "never"]
+      - movie_quality: str | None
+      - series_quality: str | None
+      - notes: list[str]
+    code_snippet: |
+      You are a helpful home server assistant. You help the user manage their home
+      server services including media, monitoring, and more. Always be concise and
+      friendly. For destructive or irreversible actions, always ask for confirmation
+      before proceeding.
+      
+      ## Media Request Flow
+      When the user asks for a movie or series:
+      
+      1. **Check quality preference**: 
+         - If movie_quality is NOT SET and user requests a movie, ask "Would you prefer 4K or 1080p?" BEFORE searching.
+         - If series_quality is NOT SET and user requests a series, ask "Would you prefer 4K or 1080p?" BEFORE searching.
+         - Use set_movie_quality or set_series_quality to save their choice.
+      
+      2. **Search first**: Call search_media to find the requested title.
+      
+      3. **Disambiguation** (if multiple results):
+         - When search_media returns multiple results, present them as a numbered list.
+         - Include title, year, and distinguishing details (director, cast, format like "Director's Cut" or "TV Series").
+         - Ask the user to pick by number or description (e.g., "the first one", "the 2004 version").
+         - NEVER expose TMDB IDs, profile IDs, or technical identifiers.
+         - Example: "I found two versions: 1) Troy (2004) - action film starring Brad Pitt, 2) Troy: Fall of a City (2018) - BBC TV series. Which one?"
+         - Only proceed after user selects a specific result.
+      
+      4. **Present selection**: Show the selected title, year, and quality that will be used.
+      
+      5. **Confirmation**:
+         - If confirmation_mode is 'always': Ask "Shall I request this?" and wait for explicit OK before calling request_media.
+         - If confirmation_mode is 'never': Call request_media immediately after search without asking.
+      
+      ## Important Rules
+      - Never call request_media without searching first.
+      - Never expose technical IDs (TMDB IDs, profile IDs) to the user.
+      - Always use the quality preference from the user's profile when requesting.
+      - If the user changes their quality preference, call set_movie_quality or set_series_quality to update it.
+      - Disambiguation happens BEFORE confirmation — first user picks which title, then confirm before requesting.
+      
+      ## User Profile
+      {% if user_name %}The user's name is {{ user_name }}.{% else %}The user has not set a name.{% endif %}
+      ALWAYS reply in {{ reply_language }}.
+      Confirmation mode: {{ confirmation_mode }} ('always' = confirm before requesting, 'never' = request immediately).
+      Movie quality preference: {{ movie_quality if movie_quality else 'NOT SET — ask before first movie request' }}
+      Series quality preference: {{ series_quality if series_quality else 'NOT SET — ask before first series request' }}
+      {% if notes %}Notes about this user: {{ notes | join('; ') }}{% endif %}
+    tests:
+      - "Template file exists at src/home_agent/prompts/system_prompt.jinja2"
+      - "Template renders without errors with sample data"
+
+  - id: 3
+    title: "Create prompts package with template loader"
+    file: "src/home_agent/prompts/__init__.py"
+    action: "create"
+    description: |
+      Create a prompts package that loads and renders Jinja2 templates. This
+      provides a clean interface for loading the system prompt template.
+    code_snippet: |
+      """System prompt templates for the home agent.
+      
+      Templates are loaded from the prompts/ directory and rendered with Jinja2.
+      """
+      
+      from pathlib import Path
+      
+      from jinja2 import Environment, FileSystemLoader
+      
+      
+      def get_prompt_template(name: str) -> str:
+          """Load a prompt template by name.
+          
+          Args:
+              name: Template name without extension (e.g., 'system_prompt').
+          
+          Returns:
+              Template content as string.
+          """
+          template_dir = Path(__file__).parent
+          template_path = template_dir / f"{name}.jinja2"
+          return template_path.read_text(encoding="utf-8")
+      
+      
+      def render_system_prompt(
+          user_name: str | None = None,
+          reply_language: str = "English",
+          confirmation_mode: str = "always",
+          movie_quality: str | None = None,
+          series_quality: str | None = None,
+          notes: list[str] | None = None,
+      ) -> str:
+          """Render the system prompt template with user profile data.
+          
+          Args:
+              user_name: User's display name.
+              reply_language: Language for bot replies.
+              confirmation_mode: 'always' or 'never'.
+              movie_quality: Preferred movie quality or None.
+              series_quality: Preferred series quality or None.
+              notes: List of user notes.
+          
+          Returns:
+              Rendered system prompt string.
+          """
+          template_str = get_prompt_template("system_prompt")
+          env = Environment(loader=FileSystemLoader(Path(__file__).parent))
+          template = env.from_string(template_str)
+          
+          return template.render(
+              user_name=user_name,
+              reply_language=reply_language,
+              confirmation_mode=confirmation_mode,
+              movie_quality=movie_quality,
+              series_quality=series_quality,
+              notes=notes or [],
+          )
+    tests:
+      - "get_prompt_template() loads system_prompt.jinja2"
+      - "render_system_prompt() renders with sample data"
+      - "render_system_prompt() handles None values correctly"
+
+  - id: 4
+    title: "Update agent.py to use Jinja2 template"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      Refactor agent.py to use the Jinja2 template for the system prompt.
+      Replace the inline system_prompt string with a call to render_system_prompt().
+      The dynamic inject_user_profile() function becomes simpler — it just calls
+      the template renderer with profile data.
+    code_snippet: |
+      from home_agent.prompts import render_system_prompt
+      
+      
+      def create_agent(
+          toolsets: list[Any] | None = None,
+          model: str = "openrouter:qwen/qwq-32b:free",
+      ) -> Agent[AgentDeps, str]:
+          """Create a PydanticAI agent with optional MCP toolsets."""
+          agent_instance: Agent[AgentDeps, str] = Agent(
+              model,
+              deps_type=AgentDeps,
+              defer_model_check=True,
+              toolsets=toolsets or [],
+              history_processors=[sliding_window_processor(n=20)],
+              system_prompt="You are a helpful home server assistant.",  # Base prompt
+          )
+      
+          @agent_instance.system_prompt(dynamic=True)
+          async def inject_user_profile(ctx: RunContext[AgentDeps]) -> str:
+              """Inject user profile into the system prompt dynamically."""
+              profile = ctx.deps.user_profile
+              prefs = profile.media_preferences
+              
+              return render_system_prompt(
+                  user_name=profile.name,
+                  reply_language=profile.reply_language,
+                  confirmation_mode=profile.confirmation_mode,
+                  movie_quality=prefs.movie_quality,
+                  series_quality=prefs.series_quality,
+                  notes=profile.notes,
+              )
+      
+          # ... rest of existing tool registration ...
+    tests:
+      - "Agent instantiates with template-based system prompt"
+      - "Dynamic prompt includes user profile data from template"
+
+  - id: 5
+    title: "Add test: System prompt includes disambiguation instructions"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the rendered system prompt includes disambiguation
+      instructions for handling multiple search results.
+    code_snippet: |
+      async def test_system_prompt_includes_disambiguation_instructions(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """System prompt includes instructions for search disambiguation."""
+          from pydantic_ai.messages import SystemPromptPart
+      
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          deps = make_agent_deps(
+              mock_config,
+              profile_manager,
+              history_manager,
+              movie_quality="4k",
+              series_quality="1080p",
+          )
+      
+          agent_instance = create_agent()
+          m = TestModel()
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run("hello", deps=deps)
+      
+          all_system_text = " ".join(
+              part.content
+              for msg in result.all_messages()
+              for part in msg.parts
+              if isinstance(part, SystemPromptPart)
+          )
+      
+          # Verify disambiguation instructions are present
+          assert "disambiguation" in all_system_text.lower() or "multiple results" in all_system_text.lower()
+          assert "numbered list" in all_system_text.lower()
+          assert "TMDB IDs" not in all_system_text or "NEVER expose" in all_system_text
+    tests:
+      - "Test passes with disambiguation instructions in system prompt"
+
+  - id: 6
+    title: "Add test: Agent asks user to choose when multiple results"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the agent presents multiple search results as
+      numbered options and asks the user to choose. Use TestModel with
+      custom_output_text to simulate the agent's disambiguation response.
+    code_snippet: |
+      async def test_agent_presents_multiple_results_as_numbered_options(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Agent presents multiple search results as numbered list and asks user to choose."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          deps = make_agent_deps(
+              mock_config,
+              profile_manager,
+              history_manager,
+              movie_quality="4k",
+          )
+      
+          agent_instance = create_agent()
+          # Simulate agent presenting options and waiting for user choice
+          m = TestModel(
+              custom_output_text=(
+                  "I found two versions: "
+                  "1) Inception (2010) - Sci-fi thriller directed by Christopher Nolan, "
+                  "2) Inception: The IMAX Experience (2010) - Extended cut. "
+                  "Which one would you like?"
+              ),
+          )
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run(
+                      "search for Inception",
+                      deps=deps,
+                  )
+      
+          # Verify the agent presented numbered options
+          assert "1)" in result.output or "1." in result.output
+          assert "2)" in result.output or "2." in result.output
+          assert "Which one" in result.output or "choose" in result.output.lower()
+    tests:
+      - "Test passes with numbered options in agent output"
+
+  - id: 7
+    title: "Add test: Agent skips disambiguation for single clear result"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the agent skips disambiguation when there's only
+      one clear search result and goes straight to confirmation.
+    code_snippet: |
+      async def test_agent_skips_disambiguation_for_single_result(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Agent skips disambiguation when search returns a single clear result."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          deps = make_agent_deps(
+              mock_config,
+              profile_manager,
+              history_manager,
+              movie_quality="4k",
+              confirmation_mode="always",
+          )
+      
+          agent_instance = create_agent()
+          # Simulate agent going straight to confirmation
+          m = TestModel(
+              custom_output_text=(
+                  "I found 'The Matrix' (1999) - Sci-fi action film. "
+                  "Shall I request this in 4K?"
+              ),
+          )
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run(
+                      "search for The Matrix",
+                      deps=deps,
+                  )
+      
+          # Verify the agent went straight to confirmation (no numbered options)
+          assert "1)" not in result.output and "1." not in result.output
+          assert "Shall I request" in result.output or "confirm" in result.output.lower()
+    tests:
+      - "Test passes with confirmation prompt (no numbered options)"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Jinja2 added to pyproject.toml dependencies"
+  - "src/home_agent/prompts/system_prompt.jinja2 exists with full prompt text"
+  - "src/home_agent/prompts/__init__.py has get_prompt_template() and render_system_prompt()"
+  - "agent.py uses render_system_prompt() for dynamic system prompt"
+  - "System prompt includes disambiguation instructions (numbered list, never expose IDs)"
+  - "test_agent.py — System prompt includes disambiguation instructions"
+  - "test_agent.py — Agent presents multiple results as numbered options"
+  - "test_agent.py — Agent skips disambiguation for single clear result"

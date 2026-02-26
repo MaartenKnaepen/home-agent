@@ -386,14 +386,15 @@ phases:
     id: '2.5'
     name: System Prompt & Confirmation Flow
     notes: 'Confirmation, quality onboarding, and language are all system prompt behaviors.
-      No new code beyond prompt text and dynamic injection.'
+      No new code beyond prompt text and dynamic injection. Disambiguation instructions
+      included here (step 2.6 may extend further).'
     scope: "- Static system prompt: confirmation policy (check confirmation_mode),\
       \ search-then-confirm flow\n- Dynamic system prompt: inject movie_quality, series_quality\
       \ (or \"NOT SET — ask\"), reply_language\n- Quality onboarding: if movie_quality\
       \ is None and user requests a movie, ask \"4K or 1080p?\" first\n- Confirmation:\
       \ show title + year + quality, wait for user OK before calling request_media\n\
       - Language: \"Always reply in {profile.reply_language}\"\n"
-    status: pending
+    status: done
     test: '- test_agent.py — Dynamic prompt includes "NOT SET" when quality is None
 
       - Dynamic prompt includes "Always reply in Dutch" when language is Dutch
@@ -411,11 +412,11 @@ phases:
       and asks the user to pick one before requesting.
     id: '2.6'
     name: Search Disambiguation
-    notes: 'The agent must never expose TMDB IDs, profile IDs, or other technical
-      identifiers to the user. Questions should be natural: "I found two versions —
-      Troy (2004) and Troy: Fall of a City (2018 TV series). Which one?" Disambiguation
-      applies to both movies and series. If only one result matches clearly, skip
-      straight to confirmation.'
+    notes: 'Disambiguation instructions integrated into the static system prompt alongside
+      the full SEARCH → DISAMBIGUATE → QUALITY → CONFIRM flow. Numbered list with
+      title, year, type, one distinguishing detail. Never expose TMDB IDs or technical
+      identifiers. Franchise/sequel handling included. Single clear match skips straight
+      to QUALITY. Implemented together with step 2.5 in the same commit.'
     scope: "- System prompt addition: when search_media returns multiple results,\
       \ present a numbered list with title, year, and distinguishing details (director,\
       \ cast, format)\n- Ask the user to pick by number or description\n- Only call\
@@ -423,7 +424,7 @@ phases:
       \ edge cases: exact title match skips disambiguation, user says \"the first\
       \ one\", user changes mind\n- Works with the confirmation flow from step 2.5\
       \ — disambiguation happens BEFORE confirmation\n"
-    status: pending
+    status: done
     test: '- test_agent.py — System prompt includes disambiguation instructions
 
       - test_agent.py — Agent with multiple search results asks user to choose (via

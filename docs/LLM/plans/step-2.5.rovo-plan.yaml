@@ -1,0 +1,352 @@
+step: "2.5"
+name: "System Prompt & Confirmation Flow"
+phase: 2
+goal: "Agent confirms before requesting, asks quality lazily, and replies in user's language."
+
+context:
+  description: |
+    Step 2.5 enhances the system prompt with confirmation flow, quality onboarding,
+    and language behaviors. The agent already injects user profile data dynamically
+    (step 2.1), but now needs explicit instructions for:
+    
+    1. **Confirmation policy**: Check confirmation_mode before calling request_media
+    2. **Quality onboarding**: If quality is NOT SET and user requests media, ask first
+    3. **Search-then-confirm flow**: Show title + year + quality, wait for OK
+    4. **Language**: Always reply in {profile.reply_language}
+    
+    These are system prompt behaviors — no new code beyond prompt text and dynamic
+    injection. The MCP tools (search_media, request_media) are already available
+    via the Jellyseerr MCP server.
+  dependencies:
+    - "src/home_agent/agent.py — create_agent() with system prompt and inject_user_profile()"
+    - "src/home_agent/profile.py — UserProfile with movie_quality, series_quality, confirmation_mode"
+    - "src/home_agent/tools/profile_tools.py — set_movie_quality, set_series_quality tools"
+    - "tests/test_agent.py — existing agent tests for reference"
+  references:
+    - "docs/LLM/implementation.yaml step 2.5 — scope and test criteria"
+    - "AGENTS.md section 1 — Agent Definition Template for system prompts"
+    - "docs/LLM/plans/user-experience/ux-profile-and-confirmation.md — design rationale"
+
+tasks:
+  - id: 1
+    title: "Extend static system prompt with confirmation and quality onboarding"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      Update the static system_prompt in create_agent() to include explicit
+      instructions for:
+      
+      1. **Confirmation flow**: When confirmation_mode is "always", show search
+         results and ask for confirmation before calling request_media. Include
+         title, year, and quality in the confirmation prompt.
+      
+      2. **Quality onboarding**: If movie_quality or series_quality is NOT SET
+         (None) and user requests that media type, ask "4K or 1080p?" BEFORE
+         searching. Use the set_movie_quality/set_series_quality tools to save.
+      
+      3. **Search-then-confirm**: Always search first, then present results with
+         quality info, then confirm, then request.
+      
+      4. **Skip confirm**: When confirmation_mode is "never", request immediately
+         after search without asking.
+    code_snippet: |
+      system_prompt=(
+          "You are a helpful home server assistant. "
+          "You help the user manage their home server services including media, monitoring, and more. "
+          "Always be concise and friendly. "
+          "For destructive or irreversible actions, always ask for confirmation before proceeding. "
+          "\\n\\n"
+          "## Media Request Flow\\n"
+          "When the user asks for a movie or series:\\n"
+          "1. **Check quality preference**: If the user's movie_quality or series_quality is NOT SET, "
+          "   ask 'Would you prefer 4K or 1080p?' BEFORE searching. Use set_movie_quality or "
+          "   set_series_quality to save their choice.\\n"
+          "2. **Search first**: Call search_media to find the requested title.\\n"
+          "3. **Present results**: Show the title, year, and quality that will be used.\\n"
+          "4. **Confirmation**: If confirmation_mode is 'always', ask 'Shall I request this?' "
+          "   and wait for explicit OK before calling request_media.\\n"
+          "5. **Skip confirm**: If confirmation_mode is 'never', call request_media immediately "
+          "   after search without asking.\\n"
+          "\\n"
+          "## Important Rules\\n"
+          "- Never call request_media without searching first.\\n"
+          "- Never expose technical IDs (TMDB IDs, profile IDs) to the user.\\n"
+          "- Always use the quality preference from the user's profile when requesting.\\n"
+          "- If the user changes their quality preference, call set_movie_quality or "
+          "set_series_quality to update it."
+      ),
+    tests:
+      - "test_agent.py — System prompt contains quality onboarding instructions"
+      - "test_agent.py — System prompt contains confirmation flow instructions"
+
+  - id: 2
+    title: "Update inject_user_profile() to show NOT SET status clearly"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      The dynamic inject_user_profile() function already shows quality preferences.
+      Ensure the "NOT SET" message is prominent and includes action guidance for
+      the LLM. Also ensure reply_language and confirmation_mode are clearly stated.
+    code_snippet: |
+      @agent_instance.system_prompt(dynamic=True)
+      async def inject_user_profile(ctx: RunContext[AgentDeps]) -> str:
+          """Inject user profile into the system prompt dynamically.
+          
+          Args:
+              ctx: Runtime context with dependencies.
+          
+          Returns:
+              A string fragment to append to the system prompt.
+          """
+          profile = ctx.deps.user_profile
+          name_part = f"The user's name is {profile.name}." if profile.name else "The user has not set a name."
+          prefs = profile.media_preferences
+          
+          # Quality preferences with clear NOT SET indicators
+          movie_q = prefs.movie_quality if prefs.movie_quality else "NOT SET — ask before first movie request"
+          series_q = prefs.series_quality if prefs.series_quality else "NOT SET — ask before first series request"
+          
+          notes_part = ("Notes about this user: " + "; ".join(profile.notes)) if profile.notes else ""
+          
+          return (
+              f"\\n\\n## User Profile\\n"
+              f"{name_part}\\n"
+              f"ALWAYS reply in {profile.reply_language}.\\n"
+              f"Confirmation mode: {profile.confirmation_mode} ('always' = confirm before requesting, "
+              "'never' = request immediately).\\n"
+              f"Movie quality preference: {movie_q}\\n"
+              f"Series quality preference: {series_q}\\n"
+              f"{notes_part}"
+          ).strip()
+    tests:
+      - "test_agent.py — Dynamic prompt includes 'NOT SET — ask' when quality is None"
+      - "test_agent.py — Dynamic prompt includes 'ALWAYS reply in {language}'"
+
+  - id: 3
+    title: "Update make_agent_deps() helper in test_agent.py"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Update the make_agent_deps() helper to create profiles with various quality
+      settings for testing. This allows tests to verify the system prompt behavior
+      with both set and unset quality preferences.
+    code_snippet: |
+      def make_agent_deps(
+          config: AppConfig,
+          profile_manager: ProfileManager,
+          history_manager: HistoryManager,
+          user_id: int = 123,
+          *,
+          movie_quality: str | None = None,
+          series_quality: str | None = None,
+          reply_language: str = "English",
+          confirmation_mode: str = "always",
+      ) -> AgentDeps:
+          """Build an AgentDeps with a pre-populated UserProfile.
+          
+          Args:
+              config: Application configuration.
+              profile_manager: Manages user profile persistence.
+              history_manager: Manages conversation history.
+              user_id: Telegram user ID to use for the profile.
+              movie_quality: Optional movie quality preference.
+              series_quality: Optional series quality preference.
+              reply_language: Reply language for the profile.
+              confirmation_mode: Confirmation mode for the profile.
+          
+          Returns:
+              Fully populated AgentDeps ready for agent.run().
+          """
+          from home_agent.profile import MediaPreferences
+          
+          profile = UserProfile(
+              user_id=user_id,
+              name="Alice",
+              created_at=datetime.now(),
+              updated_at=datetime.now(),
+              media_preferences=MediaPreferences(
+                  movie_quality=movie_quality,
+                  series_quality=series_quality,
+              ),
+              reply_language=reply_language,
+              confirmation_mode=confirmation_mode,
+          )
+          return AgentDeps(
+              config=config,
+              profile_manager=profile_manager,
+              history_manager=history_manager,
+              user_profile=profile,
+          )
+    tests:
+      - "Helper accepts quality and language parameters"
+      - "Existing tests still pass with updated helper signature"
+
+  - id: 4
+    title: "Add test: Dynamic prompt includes NOT SET when quality is None"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the dynamic system prompt includes "NOT SET" when
+      quality preferences are None. This ensures the quality onboarding flow is
+      triggered.
+    code_snippet: |
+      async def test_dynamic_prompt_includes_not_set_when_quality_none(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Dynamic system prompt includes 'NOT SET' when quality preferences are None."""
+          from pydantic_ai.messages import SystemPromptPart
+      
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          # Create deps with None quality preferences (default)
+          deps = make_agent_deps(mock_config, profile_manager, history_manager)
+      
+          agent_instance = create_agent()
+          m = TestModel()
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run("hello", deps=deps)
+      
+          all_system_text = " ".join(
+              part.content
+              for msg in result.all_messages()
+              for part in msg.parts
+              if isinstance(part, SystemPromptPart)
+          )
+          assert "NOT SET" in all_system_text
+          assert "ask before first movie request" in all_system_text
+    tests:
+      - "Test passes with 'NOT SET' in system prompt"
+
+  - id: 5
+    title: "Add test: Dynamic prompt includes reply language"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the dynamic system prompt includes the user's
+      reply language, e.g., "ALWAYS reply in Dutch".
+    code_snippet: |
+      async def test_dynamic_prompt_includes_reply_language(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Dynamic system prompt includes 'ALWAYS reply in {language}'."""
+          from pydantic_ai.messages import SystemPromptPart
+      
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          deps = make_agent_deps(
+              mock_config,
+              profile_manager,
+              history_manager,
+              reply_language="Dutch",
+          )
+      
+          agent_instance = create_agent()
+          m = TestModel()
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run("hello", deps=deps)
+      
+          all_system_text = " ".join(
+              part.content
+              for msg in result.all_messages()
+              for part in msg.parts
+              if isinstance(part, SystemPromptPart)
+          )
+          assert "ALWAYS reply in Dutch" in all_system_text
+    tests:
+      - "Test passes with reply language in system prompt"
+
+  - id: 6
+    title: "Add test: Dynamic prompt includes confirmation mode"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the dynamic system prompt includes the confirmation
+      mode policy.
+    code_snippet: |
+      async def test_dynamic_prompt_includes_confirmation_mode(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Dynamic system prompt includes confirmation mode policy."""
+          from pydantic_ai.messages import SystemPromptPart
+      
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          deps = make_agent_deps(
+              mock_config,
+              profile_manager,
+              history_manager,
+              confirmation_mode="never",
+          )
+      
+          agent_instance = create_agent()
+          m = TestModel()
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run("hello", deps=deps)
+      
+          all_system_text = " ".join(
+              part.content
+              for msg in result.all_messages()
+              for part in msg.parts
+              if isinstance(part, SystemPromptPart)
+          )
+          assert "Confirmation mode: never" in all_system_text
+    tests:
+      - "Test passes with confirmation mode in system prompt"
+
+  - id: 7
+    title: "Add test: Agent calls set_movie_quality when quality not set"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies the agent asks about quality when it's not set.
+      Use TestModel with custom_output_text to simulate the agent asking
+      "Would you prefer 4K or 1080p?" and calling set_movie_quality.
+    code_snippet: |
+      async def test_agent_asks_quality_when_not_set(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Agent calls set_movie_quality when movie quality is NOT SET."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          # Create deps with None quality (default)
+          deps = make_agent_deps(mock_config, profile_manager, history_manager)
+      
+          agent_instance = create_agent()
+          # Simulate agent asking about quality and calling set_movie_quality
+          m = TestModel(
+              custom_output_text="Would you prefer 4K or 1080p for movies?",
+              call_tools=["set_movie_quality"],
+          )
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  result = await agent_instance.run(
+                      "I want to watch Inception",
+                      deps=deps,
+                  )
+      
+          # Verify the agent asked about quality
+          assert "4K or 1080p" in result.output
+          # Verify the tool was called (TestModel tracks this)
+          assert m.last_model_request_parameters is not None
+          tool_names = [t.name for t in m.last_model_request_parameters.function_tools]
+          assert "set_movie_quality" in tool_names
+    tests:
+      - "Test passes with set_movie_quality tool called"
+      - "Agent output asks about quality preference"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "Static system prompt includes confirmation flow instructions"
+  - "Static system prompt includes quality onboarding instructions"
+  - "Static system prompt includes search-then-confirm flow"
+  - "Dynamic inject_user_profile() shows 'NOT SET — ask' when quality is None"
+  - "Dynamic prompt includes 'ALWAYS reply in {profile.reply_language}'"
+  - "Dynamic prompt includes confirmation mode policy"
+  - "test_agent.py — Dynamic prompt includes 'NOT SET' when quality is None"
+  - "test_agent.py — Dynamic prompt includes 'Always reply in Dutch' when language is Dutch"
+  - "test_agent.py — Dynamic prompt includes confirmation mode based on confirmation_mode"
+  - "test_agent.py — Agent with TestModel calls set_movie_quality when quality not set"

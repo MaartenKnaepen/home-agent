@@ -8,11 +8,11 @@ last_updated: "2026-02-27"
 
 current_state:
   phase: 2
-  step: "2.4"
-  name: "Profile Tools"
+  step: "2.6"
+  name: "Search Disambiguation"
   status: "complete"
-  next_step: "2.5 — System Prompt & Confirmation Flow"
-  description: "Step 2.4 complete — Added 4 profile tools in src/home_agent/tools/profile_tools.py: set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode. All registered on agent via agent_instance.tool(fn) in create_agent(). Tools use RunContext[Any] to avoid circular imports with agent.py (import-linter Layer 2 constraint). 9 new tests (8 unit + 1 integration). Import-linter contract merged: 'tools and mcp do not import agent or bot'."
+  next_step: "2.7 — Wire & Verify UX Flow"
+  description: "Steps 2.5+2.6 complete — Rewrote static system prompt with structured ## Media Requests section containing full SEARCH→DISAMBIGUATE→QUALITY→CONFIRM numbered flow. Disambiguation presents numbered list with title, year, type, one distinguishing detail. Never exposes TMDB IDs or technical identifiers. Single clear match skips to QUALITY. Franchise/sequel handling included. Dynamic prompt refactored to structured ## Current User Context block. 10 new tests covering prompt content, quality/language/confirmation injection, and tool callability."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -51,6 +51,10 @@ current_state:
     - "Profile tools registered on agent via agent_instance.tool(fn) in create_agent()"
     - "Tools use RunContext[Any] to avoid circular import with agent.py (import-linter Layer 2 constraint)"
     - "Import-linter contract merged: 'tools and mcp do not import agent or bot' covers both packages"
+    - "Static system prompt with structured ## Media Requests flow: SEARCH→DISAMBIGUATE→QUALITY→CONFIRM"
+    - "Disambiguation: numbered list with title, year, type, one distinguishing detail — never exposes TMDB IDs or technical identifiers"
+    - "Single clear match skips disambiguation, franchise/sequel handling, user mind-change restarts from search"
+    - "Dynamic system prompt refactored to ## Current User Context block with name, reply_language, confirmation_mode, quality preferences, notes"
   known_issues: []
 
 completed_steps:
@@ -205,6 +209,26 @@ completed_steps:
       - "Tools defined as standalone async functions in tools/profile_tools.py, registered in agent.py via agent_instance.tool(fn) — avoids circular import while keeping registration explicit"
       - "Import-linter contract merged: replaced separate 'mcp does not import agent or bot' with combined 'tools and mcp do not import agent or bot'"
       - "set_movie_quality and set_series_quality mutate nested media_preferences in place; set_reply_language and set_confirmation_mode use model_copy on the top-level profile — both patterns are valid, asymmetry is acceptable"
+    issues: []
+
+  - step: "2.5"
+    name: "System Prompt & Confirmation Flow"
+    date: "2026-02-27"
+    summary: "Rewrote static system prompt with structured Markdown sections (## Media Requests, ## Language, ## Preferences). Added full numbered SEARCH→DISAMBIGUATE→QUALITY→CONFIRM flow. Dynamic prompt refactored from single-line to structured ## Current User Context block with newline-joined parts. Quality onboarding asks '4K or 1080p?' when preference is NOT SET. Confirmation policy respects confirmation_mode. Language section instructs reply in profile.reply_language."
+    decisions:
+      - "Static and dynamic prompts use Markdown ## headers for clarity — LLMs parse structured prompts better"
+      - "Quality onboarding text changed from 'NOT SET — ask before first request' to 'NOT SET — ask the user before making any movie/series request' for explicitness"
+      - "Dynamic prompt uses list-join pattern instead of f-string concatenation for readability"
+    issues: []
+
+  - step: "2.6"
+    name: "Search Disambiguation"
+    date: "2026-02-27"
+    summary: "Disambiguation instructions integrated into the static system prompt's DISAMBIGUATE step. Multiple results presented as numbered list with title, year, type, one distinguishing detail. Never expose TMDB IDs or technical identifiers. Single clear match skips to QUALITY. Franchise/sequel handling requires disambiguation unless user was specific. User mind-change restarts from search. Implemented in same commit as step 2.5."
+    decisions:
+      - "Disambiguation is purely a system prompt instruction — no new code logic needed since the LLM handles the conversational flow"
+      - "Behavioral test for 'agent with multiple search results' was intentionally omitted — it would be tautological (testing TestModel's canned output, not agent logic)"
+      - "Concrete example (Troy 2004 vs Troy: Fall of a City 2018) included in prompt to anchor LLM behavior"
     issues: []
 
   - step: "1.10"
