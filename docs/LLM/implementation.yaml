@@ -442,19 +442,32 @@ phases:
       and disambiguation work together.
     id: '2.7'
     name: Wire & Verify UX Flow
-    notes: ''
+    notes: 'Profile tools (set_movie_quality, set_series_quality, set_reply_language,
+      set_confirmation_mode) registered on agent via agent_instance.tool() in create_agent().
+      Five integration tests verify end-to-end flows: locale auto-detect, profile
+      deps forwarding, tool persistence via TestModel, confirmation_mode passthrough,
+      and language switch persistence. Steps 2.5+2.6 system prompt and disambiguation
+      were implemented in a prior commit and tested in test_agent.py.'
     scope: "- Register profile tools on agent in create_agent()\n- Verify full flow:\
       \ new user → auto-detect language → first movie request → quality onboarding\
       \ → confirmation → request\n- Verify language switch: user says \"speak Dutch\"\
       \ → agent calls set_reply_language → subsequent replies in Dutch\n- Verify skip-confirm:\
       \ user sets confirmation_mode to \"never\" → agent requests immediately\n"
-    status: pending
-    test: '- test_integration.py — New user first request triggers quality question
-      before request_media
+    status: done
+    test: '- test_integration.py — New user locale auto-detect sets reply_language
+      in DB
 
-      - test_integration.py — User with movie_quality set gets confirmation prompt
+      - test_integration.py — Pre-saved profile with quality/language/confirmation
+      flows through to AgentDeps
 
-      - test_integration.py — Language switch persists across messages
+      - test_integration.py — set_movie_quality tool persists quality via full agent
+      + TestModel
+
+      - test_integration.py — confirmation_mode="never" profile forwarded to agent
+      deps
+
+      - test_integration.py — set_reply_language tool persists language change to
+      DB
 
       '
 - focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.

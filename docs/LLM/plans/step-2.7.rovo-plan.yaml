@@ -1,0 +1,399 @@
+step: "2.7"
+name: "Wire & Verify UX Flow"
+phase: 2
+goal: "End-to-end verification that onboarding, confirmation, language switching, and disambiguation work together."
+
+context:
+  description: |
+    Step 2.7 is the final integration step for Phase 2. It verifies the complete
+    UX flow end-to-end:
+    
+    1. **New user onboarding**: Auto-detect language → first movie request → quality
+       onboarding → confirmation → request
+    2. **Language switching**: User says "speak Dutch" → agent calls set_reply_language
+       → subsequent replies in Dutch
+    3. **Skip-confirm flow**: User sets confirmation_mode to "never" → agent requests
+       immediately without asking
+    
+    These tests use TestModel to simulate agent behavior and verify the full pipeline
+    from Telegram message through agent processing to profile updates and persistence.
+    
+    Profile tools should already be registered on the agent (step 2.4), so these
+    tests verify the integrated behavior rather than individual tool functionality.
+  dependencies:
+    - "src/home_agent/agent.py — create_agent() with profile tools registered"
+    - "src/home_agent/bot.py — make_message_handler() with language auto-detection"
+    - "src/home_agent/profile.py — UserProfile with quality, language, confirmation_mode"
+    - "src/home_agent/tools/profile_tools.py — set_movie_quality, set_reply_language, set_confirmation_mode"
+    - "tests/test_integration.py — existing integration test patterns"
+    - "tests/test_agent.py — TestModel usage patterns"
+  references:
+    - "docs/LLM/implementation.yaml step 2.7 — scope and test criteria"
+    - "AGENTS.md section 6 — Testing Patterns for integration tests"
+    - "Steps 2.1-2.6 — individual feature implementations"
+
+tasks:
+  - id: 1
+    title: "Add test: New user first request triggers quality question"
+    file: "tests/test_integration.py"
+    action: "modify"
+    description: |
+      Add an integration test that verifies the complete onboarding flow for a
+      new user's first media request:
+      
+      1. New user with no quality preferences sends "I want to watch Inception"
+      2. Agent asks "Would you prefer 4K or 1080p?" (quality onboarding)
+      3. User responds "4K"
+      4. Agent calls set_movie_quality to save preference
+      5. Agent proceeds with search and confirmation
+      
+      This test verifies the quality onboarding flow from step 2.5.
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_new_user_first_request_triggers_quality_question(
+          integration_config: AppConfig,
+          integration_db: Path,
+      ) -> None:
+          """New user's first movie request triggers quality onboarding before search."""
+          from pydantic_ai.models.test import TestModel
+          from home_agent.agent import create_agent, AgentDeps
+          
+          profile_manager = ProfileManager(db_path=integration_db)
+          history_manager = HistoryManager(db_path=integration_db)
+          
+          # Create agent with TestModel that simulates quality question
+          agent_instance = create_agent()
+          m = TestModel(
+              custom_output_text="Would you prefer 4K or 1080p for movies?",
+          )
+          
+          # Create handler with real agent
+          handler = make_message_handler(integration_config, profile_manager, history_manager, agent_instance)
+          update = make_update("I want to watch Inception", user_id=12345)
+          
+          # Override agent model for this test
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await handler(update, MagicMock())
+          
+          # Verify agent asked about quality
+          update.message.reply_text.assert_called_once()
+          response_text: str = update.message.reply_text.call_args[0][0]
+          assert "4K or 1080p" in response_text
+          
+          # Verify profile was created with auto-detected language
+          profile = await profile_manager.get(12345)
+          assert profile.reply_language is not None
+    tests:
+      - "Test passes with quality question in agent response"
+      - "Profile created with auto-detected language"
+
+  - id: 2
+    title: "Add test: User with movie_quality set gets confirmation prompt"
+    file: "tests/test_integration.py"
+    action: "modify"
+    description: |
+      Add an integration test that verifies a user with existing quality preferences
+      gets the confirmation prompt (not quality onboarding):
+      
+      1. User with movie_quality="4k" sends "I want to watch The Matrix"
+      2. Agent searches and presents results
+      3. Agent asks for confirmation (not quality)
+      4. User confirms
+      5. Agent calls request_media
+      
+      This verifies the confirmation flow from step 2.5 works when quality is set.
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_user_with_quality_set_gets_confirmation_prompt(
+          integration_config: AppConfig,
+          integration_db: Path,
+      ) -> None:
+          """User with movie_quality set gets confirmation prompt, not quality question."""
+          from pydantic_ai.models.test import TestModel
+          from home_agent.agent import create_agent
+          from home_agent.profile import UserProfile, MediaPreferences
+          from datetime import datetime
+          
+          profile_manager = ProfileManager(db_path=integration_db)
+          history_manager = HistoryManager(db_path=integration_db)
+          
+          # Pre-create profile with movie_quality set
+          initial_profile = UserProfile(
+              user_id=12345,
+              name="Test User",
+              created_at=datetime.now(),
+              updated_at=datetime.now(),
+              media_preferences=MediaPreferences(movie_quality="4k"),
+              reply_language="English",
+              confirmation_mode="always",
+          )
+          await profile_manager.save(initial_profile)
+          
+          # Create agent with TestModel that simulates confirmation prompt
+          agent_instance = create_agent()
+          m = TestModel(
+              custom_output_text="I found 'The Matrix' (1999) in 4K. Shall I request this?",
+          )
+          
+          handler = make_message_handler(integration_config, profile_manager, history_manager, agent_instance)
+          update = make_update("I want to watch The Matrix", user_id=12345)
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await handler(update, MagicMock())
+          
+          # Verify agent asked for confirmation (not quality)
+          update.message.reply_text.assert_called_once()
+          response_text: str = update.message.reply_text.call_args[0][0]
+          assert "Shall I request" in response_text or "confirm" in response_text.lower()
+          assert "4K or 1080p" not in response_text  # Should NOT ask about quality
+    tests:
+      - "Test passes with confirmation prompt in response"
+      - "Response does NOT contain quality question"
+
+  - id: 3
+    title: "Add test: Language switch persists across messages"
+    file: "tests/test_integration.py"
+    action: "modify"
+    description: |
+      Add an integration test that verifies language switching persists:
+      
+      1. User with reply_language="English" says "speak Dutch from now on"
+      2. Agent calls set_reply_language("Dutch")
+      3. User sends another message
+      4. Agent replies in Dutch (verified via system prompt injection)
+      
+      This verifies the profile tools (step 2.4) and language injection (step 2.5)
+      work together.
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_language_switch_persists_across_messages(
+          integration_config: AppConfig,
+          integration_db: Path,
+      ) -> None:
+          """Language switch via set_reply_language persists across messages."""
+          from pydantic_ai.models.test import TestModel
+          from home_agent.agent import create_agent
+          from home_agent.profile import UserProfile
+          from datetime import datetime
+          
+          profile_manager = ProfileManager(db_path=integration_db)
+          history_manager = HistoryManager(db_path=integration_db)
+          
+          # Pre-create profile with English
+          initial_profile = UserProfile(
+              user_id=12345,
+              name="Test User",
+              created_at=datetime.now(),
+              updated_at=datetime.now(),
+              reply_language="English",
+              confirmation_mode="always",
+          )
+          await profile_manager.save(initial_profile)
+          
+          agent_instance = create_agent()
+          
+          # First message: user requests language switch
+          # Simulate agent calling set_reply_language and confirming
+          m1 = TestModel(
+              custom_output_text="Reply language set to Dutch. Ik zal nu in het Nederlands antwoorden.",
+              call_tools=["set_reply_language"],
+          )
+          
+          handler = make_message_handler(integration_config, profile_manager, history_manager, agent_instance)
+          update1 = make_update("speak Dutch from now on", user_id=12345)
+          
+          with agent_instance.override(model=m1):
+              async with agent_instance:
+                  await handler(update1, MagicMock())
+          
+          # Verify language was set
+          profile_after_switch = await profile_manager.get(12345)
+          assert profile_after_switch.reply_language == "Dutch"
+          
+          # Second message: verify agent replies in Dutch
+          m2 = TestModel(
+              custom_output_text="Hallo! Waarmee kan ik je helpen?",
+          )
+          update2 = make_update("hallo", user_id=12345)
+          
+          with agent_instance.override(model=m2):
+              async with agent_instance:
+                  await handler(update2, MagicMock())
+          
+          # Verify reply is in Dutch
+          update2.message.reply_text.assert_called_once()
+          response_text: str = update2.message.reply_text.call_args[0][0]
+          assert "Hallo" in response_text or "Nederlands" in response_text
+    tests:
+      - "Test passes with Dutch response after language switch"
+      - "Profile reply_language updated to 'Dutch'"
+
+  - id: 4
+    title: "Add test: Skip-confirm mode requests immediately"
+    file: "tests/test_integration.py"
+    action: "modify"
+    description: |
+      Add an integration test that verifies confirmation_mode="never" skips
+      the confirmation prompt:
+      
+      1. User with confirmation_mode="never" and movie_quality="4k" sends request
+      2. Agent searches and immediately calls request_media (no confirmation)
+      3. Agent informs user the request was made
+      
+      This verifies the skip-confirm flow from step 2.5.
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_skip_confirm_mode_requests_immediately(
+          integration_config: AppConfig,
+          integration_db: Path,
+      ) -> None:
+          """User with confirmation_mode='never' gets immediate request, no confirmation."""
+          from pydantic_ai.models.test import TestModel
+          from home_agent.agent import create_agent
+          from home_agent.profile import UserProfile, MediaPreferences
+          from datetime import datetime
+          
+          profile_manager = ProfileManager(db_path=integration_db)
+          history_manager = HistoryManager(db_path=integration_db)
+          
+          # Pre-create profile with confirmation_mode="never"
+          initial_profile = UserProfile(
+              user_id=12345,
+              name="Test User",
+              created_at=datetime.now(),
+              updated_at=datetime.now(),
+              media_preferences=MediaPreferences(movie_quality="4k"),
+              reply_language="English",
+              confirmation_mode="never",
+          )
+          await profile_manager.save(initial_profile)
+          
+          # Create agent with TestModel that simulates immediate request
+          agent_instance = create_agent()
+          m = TestModel(
+              custom_output_text="I've requested 'Inception' (2010) in 4K. You'll be notified when it's available.",
+              call_tools=["search_media", "request_media"],
+          )
+          
+          handler = make_message_handler(integration_config, profile_manager, history_manager, agent_instance)
+          update = make_update("I want to watch Inception", user_id=12345)
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await handler(update, MagicMock())
+          
+          # Verify agent did NOT ask for confirmation
+          update.message.reply_text.assert_called_once()
+          response_text: str = update.message.reply_text.call_args[0][0]
+          assert "Shall I request" not in response_text
+          assert "confirm" not in response_text.lower()
+          # Agent should indicate request was made
+          assert "requested" in response_text.lower() or "I've" in response_text
+    tests:
+      - "Test passes with immediate request (no confirmation prompt)"
+      - "Response indicates request was made"
+
+  - id: 5
+    title: "Add test: Full onboarding flow end-to-end"
+    file: "tests/test_integration.py"
+    action: "modify"
+    description: |
+      Add a comprehensive integration test that verifies the complete onboarding
+      flow in sequence:
+      
+      1. New user (no profile) sends first message
+      2. Profile created with auto-detected language
+      3. User requests movie → quality onboarding triggered
+      4. User selects quality → preference saved
+      5. Agent searches and confirms
+      6. User confirms → request made
+      
+      This is the full end-to-end flow test for Phase 2.
+    code_snippet: |
+      @pytest.mark.asyncio
+      async def test_full_onboarding_flow_end_to_end(
+          integration_config: AppConfig,
+          integration_db: Path,
+      ) -> None:
+          """Complete onboarding flow: new user → language detect → quality → confirm → request."""
+          from pydantic_ai.models.test import TestModel
+          from home_agent.agent import create_agent
+          
+          profile_manager = ProfileManager(db_path=integration_db)
+          history_manager = HistoryManager(db_path=integration_db)
+          agent_instance = create_agent()
+          
+          handler = make_message_handler(integration_config, profile_manager, history_manager, agent_instance)
+          
+          # Step 1: New user's first request (no profile exists yet)
+          # Agent should ask about quality
+          m1 = TestModel(custom_output_text="Would you prefer 4K or 1080p for movies?")
+          update1 = make_update("I want to watch Interstellar", user_id=55555)
+          
+          with agent_instance.override(model=m1):
+              async with agent_instance:
+                  await handler(update1, MagicMock())
+          
+          # Verify quality question
+          response1: str = update1.message.reply_text.call_args[0][0]
+          assert "4K or 1080p" in response1
+          
+          # Verify profile created with auto-detected language
+          profile = await profile_manager.get(55555)
+          assert profile.reply_language is not None
+          assert profile.media_preferences.movie_quality is None  # Not set yet
+          
+          # Step 2: User responds with quality choice
+          # Agent saves preference and proceeds to confirmation
+          m2 = TestModel(
+              custom_output_text="Got it! I found 'Interstellar' (2014) in 4K. Shall I request this?",
+              call_tools=["set_movie_quality"],
+          )
+          update2 = make_update("4K please", user_id=55555)
+          
+          with agent_instance.override(model=m2):
+              async with agent_instance:
+                  await handler(update2, MagicMock())
+          
+          # Verify quality was saved
+          profile_after_quality = await profile_manager.get(55555)
+          assert profile_after_quality.media_preferences.movie_quality == "4k"
+          
+          # Verify confirmation prompt
+          response2: str = update2.message.reply_text.call_args[0][0]
+          assert "Shall I request" in response2
+          
+          # Step 3: User confirms
+          # Agent calls request_media
+          m3 = TestModel(
+              custom_output_text="I've requested 'Interstellar' (2014) in 4K. You'll be notified when available!",
+              call_tools=["request_media"],
+          )
+          update3 = make_update("yes, request it", user_id=55555)
+          
+          with agent_instance.override(model=m3):
+              async with agent_instance:
+                  await handler(update3, MagicMock())
+          
+          # Verify request was made (no further confirmation)
+          response3: str = update3.message.reply_text.call_args[0][0]
+          assert "requested" in response3.lower()
+    tests:
+      - "Test passes with complete onboarding sequence"
+      - "Quality preference saved after user selects"
+      - "Confirmation prompt shown after quality set"
+      - "Request made after user confirms"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "test_integration.py — New user first request triggers quality question before request_media"
+  - "test_integration.py — User with movie_quality set gets confirmation prompt (not quality question)"
+  - "test_integration.py — Language switch persists across messages"
+  - "test_integration.py — Skip-confirm mode (confirmation_mode='never') requests immediately"
+  - "test_integration.py — Full onboarding flow end-to-end: new user → language detect → quality → confirm → request"
+  - "All profile tools (set_movie_quality, set_reply_language, set_confirmation_mode) work in integration context"
+  - "Auto-detected language persists in profile"
+  - "Quality preferences persist across messages"
