@@ -367,7 +367,7 @@ phases:
       \ reply language (natural language names)\n- set_confirmation_mode(mode: Literal[\"\
       always\", \"never\"]) — toggles confirmation\n- All tools use RunContext[AgentDeps]\
       \ and return str\n- Import-linter: tools does not import agent, bot, or main\n"
-    status: pending
+    status: done
     test: '- test_profile_tools.py — set_movie_quality updates profile and returns
       confirmation
 

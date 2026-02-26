@@ -15,6 +15,12 @@ from home_agent.config import AppConfig
 from home_agent.history import HistoryManager, sliding_window_processor
 from home_agent.mcp.registry import MCPRegistry
 from home_agent.profile import ProfileManager, UserProfile
+from home_agent.tools.profile_tools import (
+    set_confirmation_mode,
+    set_movie_quality,
+    set_reply_language,
+    set_series_quality,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +116,12 @@ def create_agent(
         await ctx.deps.profile_manager.save(profile)
         logger.info("Added note to profile for user %s", profile.user_id)
         return f"Noted: {note}"
+
+    # Register profile preference tools
+    agent_instance.tool(set_movie_quality)
+    agent_instance.tool(set_series_quality)
+    agent_instance.tool(set_reply_language)
+    agent_instance.tool(set_confirmation_mode)
 
     return agent_instance
 

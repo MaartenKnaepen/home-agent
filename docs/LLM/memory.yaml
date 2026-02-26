@@ -8,11 +8,11 @@ last_updated: "2026-02-27"
 
 current_state:
   phase: 2
-  step: "2.3"
-  name: "Admin Config for Quality Profiles"
+  step: "2.4"
+  name: "Profile Tools"
   status: "complete"
-  next_step: "2.4 — Profile Tools"
-  description: "Step 2.3 complete — Added jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id (int | None = None) to AppConfig. Pydantic field_validator rejects zero and negative values. .env.example updated with commented-out examples and instructions for finding IDs in Jellyseerr settings."
+  next_step: "2.5 — System Prompt & Confirmation Flow"
+  description: "Step 2.4 complete — Added 4 profile tools in src/home_agent/tools/profile_tools.py: set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode. All registered on agent via agent_instance.tool(fn) in create_agent(). Tools use RunContext[Any] to avoid circular imports with agent.py (import-linter Layer 2 constraint). 9 new tests (8 unit + 1 integration). Import-linter contract merged: 'tools and mcp do not import agent or bot'."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -47,6 +47,10 @@ current_state:
     - "Auto-detect reply language from Telegram locale on first profile creation (resolve_language in profile.py)"
     - "ProfileManager.get() accepts language_code kwarg — only used for new user creation, existing profiles unaffected"
     - "AppConfig has jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id (int | None = None) with positive-int validation"
+    - "Profile tools package: src/home_agent/tools/ with set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode"
+    - "Profile tools registered on agent via agent_instance.tool(fn) in create_agent()"
+    - "Tools use RunContext[Any] to avoid circular import with agent.py (import-linter Layer 2 constraint)"
+    - "Import-linter contract merged: 'tools and mcp do not import agent or bot' covers both packages"
   known_issues: []
 
 completed_steps:
@@ -190,6 +194,17 @@ completed_steps:
       - "Both fields default to None — bot works out of the box without requiring admin to look up profile IDs"
       - "Zero is rejected alongside negative values — Jellyseerr profile IDs are always positive integers"
       - "Validator covers both fields with a single @field_validator decorator"
+    issues: []
+
+  - step: "2.4"
+    name: "Profile Tools"
+    date: "2026-02-27"
+    summary: "Created src/home_agent/tools/ package with 4 profile tools: set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode. All async, return confirmation strings, persist via ProfileManager. Registered on agent in create_agent() via agent_instance.tool(fn). 9 new tests (8 unit with DB roundtrip + 1 integration verifying tool registration)."
+    decisions:
+      - "Tools use RunContext[Any] instead of RunContext[AgentDeps] — import-linter catches even TYPE_CHECKING-guarded imports, so importing AgentDeps from agent.py would break the Layer 2 contract"
+      - "Tools defined as standalone async functions in tools/profile_tools.py, registered in agent.py via agent_instance.tool(fn) — avoids circular import while keeping registration explicit"
+      - "Import-linter contract merged: replaced separate 'mcp does not import agent or bot' with combined 'tools and mcp do not import agent or bot'"
+      - "set_movie_quality and set_series_quality mutate nested media_preferences in place; set_reply_language and set_confirmation_mode use model_copy on the top-level profile — both patterns are valid, asymmetry is acceptable"
     issues: []
 
   - step: "1.10"

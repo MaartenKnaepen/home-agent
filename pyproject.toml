@@ -74,23 +74,11 @@ forbidden_modules = [
     "home_agent.mcp",
 ]
 
-# Layer 2 — mcp: no imports from agent, bot, main
-# NOTE: When home_agent.tools is created (step 1.9+), replace the active contract
-# below with this combined one that covers both tools and mcp together:
-# [[tool.importlinter.contracts]]
-# name = "tools and mcp do not import agent or bot"
-# type = "forbidden"
-# source_modules = ["home_agent.tools", "home_agent.mcp"]
-# forbidden_modules = [
-#     "home_agent.agent",
-#     "home_agent.bot",
-#     "home_agent.main",
-# ]
-
+# Layer 2 — tools and mcp: no imports from agent, bot, or main
 [[tool.importlinter.contracts]]
-name = "mcp does not import agent or bot"
+name = "tools and mcp do not import agent or bot"
 type = "forbidden"
-source_modules = ["home_agent.mcp"]
+source_modules = ["home_agent.tools", "home_agent.mcp"]
 forbidden_modules = [
     "home_agent.agent",
     "home_agent.bot",
@@ -125,6 +113,7 @@ source_modules = [
     "home_agent.agent",
     "home_agent.bot",
     "home_agent.mcp",
+    "home_agent.tools",
 ]
 forbidden_modules = ["home_agent.main"]
 

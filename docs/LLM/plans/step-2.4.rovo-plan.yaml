@@ -1,0 +1,427 @@
+step: "2.4"
+name: "Profile Tools"
+phase: 2
+goal: "Agent can update user preferences via tool calls during conversation."
+
+context:
+  description: |
+    Step 2.4 creates the `src/home_agent/tools/` package with profile management tools.
+    These tools allow the agent to update user preferences during conversation:
+    - set_movie_quality: Set preferred movie quality (4k or 1080p)
+    - set_series_quality: Set preferred series quality (4k or 1080p)
+    - set_reply_language: Update the language for bot replies
+    - set_confirmation_mode: Toggle confirmation mode (always/never)
+    
+    Each tool uses RunContext[AgentDeps] to access ProfileManager and returns a
+    confirmation string. Tools are registered on the agent in agent.py.
+    
+    Import-linter contract: tools does not import agent, bot, or main (Layer 2).
+  dependencies:
+    - "src/home_agent/profile.py — UserProfile, MediaPreferences, ProfileManager"
+    - "src/home_agent/agent.py — AgentDeps, create_agent() where tools are registered"
+    - "src/home_agent/mcp/registry.py — existing tools package structure reference"
+    - "tests/test_profile.py — existing profile tests for reference"
+  references:
+    - "docs/LLM/implementation.yaml step 2.4 — scope and test criteria"
+    - "AGENTS.md section 1 — Agent Definition Template for tool registration"
+    - "pyproject.toml — import-linter Layer 2 contract for tools package"
+
+tasks:
+  - id: 1
+    title: "Create tools package structure"
+    file: "src/home_agent/tools/__init__.py"
+    action: "create"
+    description: |
+      Create the tools package with __init__.py that exports the profile tools.
+      This establishes the package structure for future tool modules.
+    code_snippet: |
+      """Agent tools for home server management.
+      
+      Tools are agent-callable functions that perform actions on behalf of the user.
+      Each tool uses RunContext[AgentDeps] and returns a confirmation string.
+      
+      Import-linter contract: tools does not import agent, bot, or main.
+      """
+      
+      from home_agent.tools.profile_tools import (
+          set_movie_quality,
+          set_series_quality,
+          set_reply_language,
+          set_confirmation_mode,
+      )
+      
+      __all__ = [
+          "set_movie_quality",
+          "set_series_quality",
+          "set_reply_language",
+          "set_confirmation_mode",
+      ]
+    tests:
+      - "Package imports successfully"
+      - "All profile tools are exported"
+
+  - id: 2
+    title: "Create profile_tools.py with quality and preference tools"
+    file: "src/home_agent/tools/profile_tools.py"
+    action: "create"
+    description: |
+      Create the profile tools module with four tools:
+      1. set_movie_quality(quality: Literal["4k", "1080p"]) -> str
+      2. set_series_quality(quality: Literal["4k", "1080p"]) -> str
+      3. set_reply_language(language: str) -> str
+      4. set_confirmation_mode(mode: Literal["always", "never"]) -> str
+      
+      Each tool:
+      - Takes RunContext[AgentDeps] as first parameter
+      - Updates the user profile via ProfileManager
+      - Returns a confirmation string
+      - Has a descriptive docstring for the LLM
+    code_snippet: |
+      """Profile management tools for the home agent.
+      
+      These tools allow the agent to update user preferences during conversation.
+      """
+      
+      import logging
+      from typing import Literal
+      
+      from pydantic_ai import RunContext
+      
+      from home_agent.agent import AgentDeps
+      
+      logger = logging.getLogger(__name__)
+      
+      
+      async def set_movie_quality(
+          ctx: RunContext[AgentDeps],
+          quality: Literal["4k", "1080p"],
+      ) -> str:
+          """Set the user's preferred movie quality.
+          
+          Call this when the user specifies their quality preference for movies,
+          or when onboarding a new user who hasn't set a preference yet.
+          
+          Args:
+              ctx: Runtime context with dependencies.
+              quality: Preferred quality ("4k" or "1080p").
+          
+          Returns:
+              Confirmation message.
+          """
+          profile = ctx.deps.user_profile
+          profile.media_preferences.movie_quality = quality
+          await ctx.deps.profile_manager.save(profile)
+          logger.info("User %s set movie quality to %s", profile.user_id, quality)
+          return f"Movie quality preference set to {quality}."
+      
+      
+      async def set_series_quality(
+          ctx: RunContext[AgentDeps],
+          quality: Literal["4k", "1080p"],
+      ) -> str:
+          """Set the user's preferred series quality.
+          
+          Call this when the user specifies their quality preference for series,
+          or when onboarding a new user who hasn't set a preference yet.
+          
+          Args:
+              ctx: Runtime context with dependencies.
+              quality: Preferred quality ("4k" or "1080p").
+          
+          Returns:
+              Confirmation message.
+          """
+          profile = ctx.deps.user_profile
+          profile.media_preferences.series_quality = quality
+          await ctx.deps.profile_manager.save(profile)
+          logger.info("User %s set series quality to %s", profile.user_id, quality)
+          return f"Series quality preference set to {quality}."
+      
+      
+      async def set_reply_language(
+          ctx: RunContext[AgentDeps],
+          language: str,
+      ) -> str:
+          """Set the language used for bot replies.
+          
+          Call this when the user requests to switch languages, e.g., "speak Dutch"
+          or "reply in French".
+          
+          Args:
+              ctx: Runtime context with dependencies.
+              language: Language name (e.g., "Dutch", "French", "English").
+          
+          Returns:
+              Confirmation message.
+          """
+          profile = ctx.deps.user_profile
+          profile.reply_language = language
+          await ctx.deps.profile_manager.save(profile)
+          logger.info("User %s set reply language to %s", profile.user_id, language)
+          return f"Reply language set to {language}."
+      
+      
+      async def set_confirmation_mode(
+          ctx: RunContext[AgentDeps],
+          mode: Literal["always", "never"],
+      ) -> str:
+          """Set whether the agent confirms before requesting media.
+          
+          When mode is "always", the agent shows search results and asks for
+          confirmation before calling request_media. When "never", the agent
+          requests immediately after search.
+          
+          Args:
+              ctx: Runtime context with dependencies.
+              mode: Confirmation mode ("always" or "never").
+          
+          Returns:
+              Confirmation message.
+          """
+          profile = ctx.deps.user_profile
+          profile.confirmation_mode = mode
+          await ctx.deps.profile_manager.save(profile)
+          logger.info("User %s set confirmation mode to %s", profile.user_id, mode)
+          return f"Confirmation mode set to {mode}."
+    tests:
+      - "test_profile_tools.py — All four tools update profile and return confirmation"
+      - "test_profile_tools.py — Changes persist via ProfileManager"
+
+  - id: 3
+    title: "Register profile tools on the agent in agent.py"
+    file: "src/home_agent/agent.py"
+    action: "modify"
+    description: |
+      Import the profile tools from home_agent.tools and register them on the
+      agent instance in create_agent(). Use the @agent_instance.tool decorator
+      pattern (same as update_user_note).
+    code_snippet: |
+      from home_agent.tools import (
+          set_movie_quality,
+          set_series_quality,
+          set_reply_language,
+          set_confirmation_mode,
+      )
+      
+      
+      def create_agent(...) -> Agent[AgentDeps, str]:
+          # ... existing agent creation code ...
+          
+          # Register profile tools
+          agent_instance.tool(set_movie_quality)
+          agent_instance.tool(set_series_quality)
+          agent_instance.tool(set_reply_language)
+          agent_instance.tool(set_confirmation_mode)
+          
+          # ... existing update_user_note tool ...
+          
+          return agent_instance
+    tests:
+      - "test_agent.py — All four profile tools are registered on the agent"
+
+  - id: 4
+    title: "Create test_profile_tools.py"
+    file: "tests/test_profile_tools.py"
+    action: "create"
+    description: |
+      Create comprehensive tests for the profile tools. Each tool should be
+      tested for:
+      1. Updating the profile correctly
+      2. Persisting changes via ProfileManager
+      3. Returning the correct confirmation message
+      
+      Use the same test patterns as test_agent.py (mock deps, TestModel).
+    code_snippet: |
+      """Tests for profile management tools.
+      
+      Covers set_movie_quality, set_series_quality, set_reply_language,
+      and set_confirmation_mode tools.
+      """
+      
+      from __future__ import annotations
+      
+      from datetime import datetime
+      from pathlib import Path
+      
+      import pytest
+      from pydantic_ai.models.test import TestModel
+      
+      from home_agent.agent import AgentDeps, create_agent
+      from home_agent.config import AppConfig
+      from home_agent.history import HistoryManager
+      from home_agent.profile import ProfileManager, UserProfile
+      
+      
+      @pytest.fixture
+      async def test_deps(test_db: Path, mock_config: AppConfig) -> AgentDeps:
+          """Create test dependencies with a fresh user profile."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          
+          profile = UserProfile(
+              user_id=123,
+              name="Test User",
+              created_at=datetime.now(),
+              updated_at=datetime.now(),
+          )
+          await profile_manager.save(profile)
+          
+          return AgentDeps(
+              config=mock_config,
+              profile_manager=profile_manager,
+              history_manager=history_manager,
+              user_profile=profile,
+          )
+      
+      
+      @pytest.mark.asyncio
+      async def test_set_movie_quality_updates_profile(test_deps: AgentDeps) -> None:
+          """set_movie_quality updates profile and returns confirmation."""
+          agent_instance = create_agent()
+          m = TestModel(call_tools=["set_movie_quality"])
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await agent_instance.run(
+                      "set my movie quality to 4k",
+                      deps=test_deps,
+                  )
+          
+          assert test_deps.user_profile.media_preferences.movie_quality == "4k"
+      
+      
+      @pytest.mark.asyncio
+      async def test_set_movie_quality_persists(test_deps: AgentDeps) -> None:
+          """set_movie_quality persists changes to the database."""
+          agent_instance = create_agent()
+          m = TestModel(call_tools=["set_movie_quality"])
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await agent_instance.run(
+                      "set my movie quality to 1080p",
+                      deps=test_deps,
+                  )
+          
+          saved_profile = await test_deps.profile_manager.get(123)
+          assert saved_profile.media_preferences.movie_quality == "1080p"
+      
+      
+      @pytest.mark.asyncio
+      async def test_set_series_quality_updates_profile(test_deps: AgentDeps) -> None:
+          """set_series_quality updates profile and returns confirmation."""
+          agent_instance = create_agent()
+          m = TestModel(call_tools=["set_series_quality"])
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await agent_instance.run(
+                      "set my series quality to 4k",
+                      deps=test_deps,
+                  )
+          
+          assert test_deps.user_profile.media_preferences.series_quality == "4k"
+      
+      
+      @pytest.mark.asyncio
+      async def test_set_reply_language_updates_profile(test_deps: AgentDeps) -> None:
+          """set_reply_language updates profile.reply_language."""
+          agent_instance = create_agent()
+          m = TestModel(call_tools=["set_reply_language"])
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await agent_instance.run(
+                      "speak Dutch from now on",
+                      deps=test_deps,
+                  )
+          
+          assert test_deps.user_profile.reply_language == "Dutch"
+      
+      
+      @pytest.mark.asyncio
+      async def test_set_confirmation_mode_updates_profile(test_deps: AgentDeps) -> None:
+          """set_confirmation_mode updates profile.confirmation_mode."""
+          agent_instance = create_agent()
+          m = TestModel(call_tools=["set_confirmation_mode"])
+          
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await agent_instance.run(
+                      "don't ask for confirmation, just request automatically",
+                      deps=test_deps,
+                  )
+          
+          assert test_deps.user_profile.confirmation_mode == "never"
+    tests:
+      - "All profile tool tests pass"
+      - "Tools persist changes to database"
+
+  - id: 5
+    title: "Update pyproject.toml import-linter contract"
+    file: "pyproject.toml"
+    action: "modify"
+    description: |
+      Uncomment and update the combined import-linter contract for tools and mcp
+      to enforce Layer 2: neither tools nor mcp may import agent, bot, or main.
+      
+      Replace the current "mcp does not import agent or bot" contract with the
+      combined version that covers both packages.
+    code_snippet: |
+      # Layer 2 — tools and mcp: no imports from agent, bot, main
+      [[tool.importlinter.contracts]]
+      name = "tools and mcp do not import agent or bot"
+      type = "forbidden"
+      source_modules = ["home_agent.tools", "home_agent.mcp"]
+      forbidden_modules = [
+          "home_agent.agent",
+          "home_agent.bot",
+          "home_agent.main",
+      ]
+    tests:
+      - "lint-imports passes with no forbidden imports"
+
+  - id: 6
+    title: "Update test_agent.py to verify profile tools are registered"
+    file: "tests/test_agent.py"
+    action: "modify"
+    description: |
+      Add a test that verifies all four profile tools are registered on the agent,
+      similar to the existing test_agent_has_update_user_note_tool test.
+    code_snippet: |
+      async def test_agent_has_profile_tools(
+          mock_config: AppConfig, test_db: Path
+      ) -> None:
+          """Profile tools are registered on the agent."""
+          profile_manager = ProfileManager(test_db)
+          history_manager = HistoryManager(test_db)
+          deps = make_agent_deps(mock_config, profile_manager, history_manager)
+      
+          agent_instance = create_agent()
+          m = TestModel()
+          with agent_instance.override(model=m):
+              async with agent_instance:
+                  await agent_instance.run("hello", deps=deps)
+      
+          assert m.last_model_request_parameters is not None
+          tool_names = [t.name for t in m.last_model_request_parameters.function_tools]
+          assert "set_movie_quality" in tool_names
+          assert "set_series_quality" in tool_names
+          assert "set_reply_language" in tool_names
+          assert "set_confirmation_mode" in tool_names
+    tests:
+      - "New profile tools test passes"
+      - "All existing agent tests still pass"
+
+verification:
+  - "All tasks completed"
+  - "verify.sh passes (ty, lint-imports, pytest)"
+  - "src/home_agent/tools/ package exists with __init__.py"
+  - "src/home_agent/tools/profile_tools.py has all four tools"
+  - "All tools use RunContext[AgentDeps] and return str"
+  - "Profile tools are registered on the agent in create_agent()"
+  - "Import-linter Layer 2 contract: tools does not import agent, bot, or main"
+  - "test_profile_tools.py — set_movie_quality updates profile and returns confirmation"
+  - "test_profile_tools.py — set_reply_language('Dutch') updates profile.reply_language"
+  - "test_profile_tools.py — set_confirmation_mode('never') updates profile.confirmation_mode"
+  - "All tools persist changes via ProfileManager"

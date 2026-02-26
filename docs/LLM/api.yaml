@@ -126,6 +126,37 @@ modules:
         signature: "async (profile: UserProfile) -> None"
         description: "Persist a user profile to the database, updating the updated_at timestamp."
 
+  # ── src/home_agent/tools/__init__.py ─────────────────────────────────────────
+  - module: "src/home_agent/tools/__init__.py"
+    exports:
+      - name: "tools"
+        type: "package"
+        signature: ""
+        description: "Agent tools package. Contains tool functions registered on the PydanticAI agent in agent.py."
+
+  # ── src/home_agent/tools/profile_tools.py ──────────────────────────────────
+  - module: "src/home_agent/tools/profile_tools.py"
+    exports:
+      - name: "set_movie_quality"
+        type: "tool"
+        signature: "async (ctx: RunContext[Any], quality: Literal['4k', '1080p']) -> str"
+        description: "Store the user's preferred movie download quality. Updates profile.media_preferences.movie_quality and persists via ProfileManager."
+
+      - name: "set_series_quality"
+        type: "tool"
+        signature: "async (ctx: RunContext[Any], quality: Literal['4k', '1080p']) -> str"
+        description: "Store the user's preferred series download quality. Updates profile.media_preferences.series_quality and persists via ProfileManager."
+
+      - name: "set_reply_language"
+        type: "tool"
+        signature: "async (ctx: RunContext[Any], language: str) -> str"
+        description: "Update the language the agent uses to reply to this user. Accepts natural language names (e.g. 'Dutch', 'French'). Persists via ProfileManager."
+
+      - name: "set_confirmation_mode"
+        type: "tool"
+        signature: "async (ctx: RunContext[Any], mode: Literal['always', 'never']) -> str"
+        description: "Toggle whether the agent confirms before requesting media. 'always' = confirm first (default), 'never' = request immediately. Persists via ProfileManager."
+
   # ── src/home_agent/agent.py ─────────────────────────────────────────────────
   - module: "src/home_agent/agent.py"
     exports:
@@ -137,7 +168,7 @@ modules:
       - name: "create_agent"
         type: "function"
         signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free') -> Agent[AgentDeps, str]"
-        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static+dynamic system prompt, and update_user_note tool."
+        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static+dynamic system prompt, update_user_note tool, and 4 profile tools (set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode)."
 
       - name: "inject_user_profile"
         type: "function"
