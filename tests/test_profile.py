@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from home_agent.db import init_db
-from home_agent.profile import MediaPreferences, ProfileManager, UserProfile
+from home_agent.profile import MediaPreferences, ProfileManager, UserProfile, resolve_language
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def test_default_profile_has_sensible_defaults() -> None:
     profile = _make_profile()
     assert profile.media_preferences.movie_quality is None
     assert profile.media_preferences.series_quality is None
-    assert profile.reply_language == "english"
+    assert profile.reply_language == "English"
     assert profile.confirmation_mode == "always"
     assert len(profile.notes) == 0
 
@@ -105,7 +105,7 @@ async def test_profile_manager_creates_default_for_unknown_user(
     assert profile.user_id == new_user_id
     assert profile.media_preferences.movie_quality is None
     assert profile.media_preferences.series_quality is None
-    assert profile.reply_language == "english"
+    assert profile.reply_language == "English"
     assert profile.notes == []
 
 
@@ -201,7 +201,7 @@ def test_profile_migration_ignores_removed_fields() -> None:
     # Pydantic should ignore unknown fields and use defaults for new fields
     profile = UserProfile.model_validate(old_data)
     assert profile.user_id == 1
-    assert profile.reply_language == "english"
+    assert profile.reply_language == "English"
     assert profile.confirmation_mode == "always"
     assert profile.media_preferences.movie_quality is None
 
@@ -222,3 +222,56 @@ def test_profile_new_fields_roundtrip() -> None:
     assert reloaded.confirmation_mode == "never"
     assert reloaded.media_preferences.movie_quality == "4k"
     assert reloaded.media_preferences.series_quality == "1080p"
+
+
+# ── Language auto-detection ────────────────────────────────────────────────────
+
+
+def test_resolve_language_known_locale() -> None:
+    """resolve_language maps known locale codes to language names."""
+    assert resolve_language("nl") == "Dutch"
+    assert resolve_language("en") == "English"
+    assert resolve_language("fr") == "French"
+    assert resolve_language("de") == "German"
+    assert resolve_language("es") == "Spanish"
+
+
+def test_resolve_language_with_region_code() -> None:
+    """resolve_language handles locale codes with region suffix."""
+    assert resolve_language("en-US") == "English"
+    assert resolve_language("nl-BE") == "Dutch"
+    assert resolve_language("fr-CA") == "French"
+
+
+def test_resolve_language_unknown_falls_back() -> None:
+    """resolve_language returns English for unknown locale codes."""
+    assert resolve_language("ja") == "English"
+    assert resolve_language("zh") == "English"
+
+
+def test_resolve_language_none_falls_back() -> None:
+    """resolve_language returns English when language_code is None."""
+    assert resolve_language(None) == "English"
+
+
+@pytest.mark.asyncio
+async def test_profile_manager_uses_language_code_for_new_user(
+    test_db: Path,
+) -> None:
+    """ProfileManager sets reply_language from language_code for new users."""
+    manager = ProfileManager(test_db)
+    profile = await manager.get(777, language_code="nl")
+    assert profile.reply_language == "Dutch"
+
+
+@pytest.mark.asyncio
+async def test_profile_manager_ignores_language_code_for_existing_user(
+    test_db: Path,
+) -> None:
+    """ProfileManager ignores language_code for users with existing profiles."""
+    manager = ProfileManager(test_db)
+    # Create with Dutch
+    await manager.get(888, language_code="nl")
+    # Re-fetch with English — should NOT change
+    profile = await manager.get(888, language_code="en")
+    assert profile.reply_language == "Dutch"

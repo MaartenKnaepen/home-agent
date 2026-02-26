@@ -323,7 +323,7 @@ phases:
       \ first profile creation\n- Minimal mapping: nl → Dutch, en → English, fr →\
       \ French, de → German, fallback → English\n- ProfileManager.get_or_create_profile()\
       \ accepts optional language_code parameter\n"
-    status: pending
+    status: done
     test: '- test_bot.py — New user with language_code="nl" gets profile with reply_language="Dutch"
 
       - New user with language_code=None gets reply_language="English"

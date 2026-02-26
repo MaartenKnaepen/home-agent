@@ -4,15 +4,15 @@
 # Updated after each completed step by autodev.
 
 project: home-agent
-last_updated: "2026-02-26"
+last_updated: "2026-02-27"
 
 current_state:
   phase: 2
-  step: "2.1"
-  name: "Simplify UserProfile"
+  step: "2.2"
+  name: "Auto-detect Reply Language"
   status: "complete"
-  next_step: "2.2 — Auto-detect Reply Language"
-  description: "Phase 2 started. Step 2.1 complete — UserProfile simplified: removed dead fields (NotificationPrefs, stats, preferred_genres, avoid_genres, preferred_language), added movie_quality/series_quality split, reply_language, confirmation_mode. Dynamic system prompt updated in agent.py. Migration handled via Pydantic v2 default extra='ignore' behavior."
+  next_step: "2.3 — Admin Config for Quality Profiles"
+  description: "Step 2.2 complete — New users get reply_language auto-detected from Telegram locale. resolve_language() maps locale codes (nl→Dutch, en→English, fr→French, de→German, es→Spanish) with English fallback. ProfileManager.get() accepts optional language_code kwarg, used only on first profile creation. bot.py reads update.effective_user.language_code and passes it through. UserProfile.reply_language default capitalized to 'English' for consistency."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -44,6 +44,8 @@ current_state:
     - "PYTHONPATH=/app/src in Dockerfile runtime stage — required because uv installs as editable"
     - "Compose run command: docker compose -f deployment/docker-compose.yml --env-file .env up -d"
     - "Old profiles with removed fields (NotificationPrefs, stats, old MediaPreferences) migrate seamlessly on next load/save"
+    - "Auto-detect reply language from Telegram locale on first profile creation (resolve_language in profile.py)"
+    - "ProfileManager.get() accepts language_code kwarg — only used for new user creation, existing profiles unaffected"
   known_issues: []
 
 completed_steps:
@@ -165,6 +167,18 @@ completed_steps:
       - "No explicit ConfigDict(extra='ignore') needed — Pydantic v2 ignores extra fields by default"
       - "agent.py dynamic prompt updated in this step (not deferred to 2.5) because old field references would have broken"
       - "confirmation_mode uses only 'always' and 'never' — 'smart' rejected per plan sparring as YAGNI"
+    issues: []
+
+  - step: "2.2"
+    name: "Auto-detect Reply Language"
+    date: "2026-02-27"
+    summary: "New users get reply_language auto-detected from Telegram locale on first profile creation. Added resolve_language() function with minimal locale-to-language mapping (nl→Dutch, en→English, fr→French, de→German, es→Spanish, fallback→English). ProfileManager.get() accepts optional language_code kwarg, used only for new users. bot.py reads update.effective_user.language_code and passes it through. UserProfile.reply_language default capitalized from 'english' to 'English' for consistency with resolve output."
+    decisions:
+      - "Mapping kept minimal — only languages the admin expects users to speak, extend as needed"
+      - "es→Spanish added beyond plan spec (nl, en, fr, de) — acceptable minimal extension"
+      - "language_code is keyword-only arg on ProfileManager.get() to avoid breaking existing callers"
+      - "Existing profiles are never modified when language_code is passed — only affects new user creation"
+      - "UserProfile.reply_language default changed from 'english' to 'English' for consistency with resolve_language() output"
     issues: []
 
   - step: "1.10"

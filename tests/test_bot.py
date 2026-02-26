@@ -23,17 +23,20 @@ from home_agent.profile import ProfileManager
 # ---------------------------------------------------------------------------
 
 
-def make_test_update(text: str, user_id: int = 123) -> Update:
+def make_test_update(
+    text: str, user_id: int = 123, language_code: str | None = "en"
+) -> Update:
     """Create a mock Telegram Update for testing.
 
     Args:
         text: The message text.
         user_id: The Telegram user ID of the sender.
+        language_code: Telegram locale code (e.g. 'en', 'nl'). Defaults to 'en'.
 
     Returns:
         A mock :class:`telegram.Update` object wired with AsyncMock reply methods.
     """
-    user = User(id=user_id, is_bot=False, first_name="Test")
+    user = User(id=user_id, is_bot=False, first_name="Test", language_code=language_code)
     chat = Chat(id=user_id, type="private")
 
     message = MagicMock(spec=Message)
@@ -127,3 +130,56 @@ async def test_typing_action_sent_before_response(
 
     update.effective_chat.send_action.assert_called_once_with(action=ChatAction.TYPING)
     update.message.reply_text.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_new_user_gets_language_from_locale(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """New user with Dutch Telegram locale gets reply_language='Dutch'."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
+    mock_result = MagicMock()
+    mock_result.output = "Hallo!"
+
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    update = make_test_update("hallo", user_id=123, language_code="nl")
+    await handler(update, MagicMock())
+
+    # Verify the profile was created with Dutch
+    profile = await profile_manager.get(123)
+    assert profile.reply_language == "Dutch"
+
+
+@pytest.mark.asyncio
+async def test_existing_user_language_not_overwritten(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """Existing user's reply_language is not overwritten on subsequent messages."""
+    from home_agent.profile import resolve_language  # noqa: F401 – imported for clarity
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
+    # Pre-create profile with French
+    profile = await profile_manager.get(456, language_code="fr")
+    assert profile.reply_language == "French"
+
+    mock_result = MagicMock()
+    mock_result.output = "Reply"
+
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    # Send message with different language_code — should NOT overwrite
+    update = make_test_update("hello", user_id=456, language_code="en")
+    await handler(update, MagicMock())
+
+    # Profile should still be French
+    profile = await profile_manager.get(456)
+    assert profile.reply_language == "French"

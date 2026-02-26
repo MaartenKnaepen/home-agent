@@ -15,6 +15,35 @@ from home_agent.db import get_profile, save_profile
 
 logger = logging.getLogger(__name__)
 
+# Minimal locale → language name mapping. Only languages the admin expects users
+# to speak. Extend as needed. The LLM interprets these names in the system prompt.
+_LOCALE_TO_LANGUAGE: dict[str, str] = {
+    "nl": "Dutch",
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+}
+
+_DEFAULT_LANGUAGE = "English"
+
+
+def resolve_language(language_code: str | None) -> str:
+    """Map a Telegram language_code to a human-readable language name.
+
+    Args:
+        language_code: ISO 639-1 code from Telegram (e.g. 'nl', 'en-US').
+            May be None if the user hasn't set a Telegram locale.
+
+    Returns:
+        A human-readable language name (e.g. 'Dutch', 'English').
+    """
+    if not language_code:
+        return _DEFAULT_LANGUAGE
+    # Telegram can send codes like 'en-US'; take the first part
+    base_code = language_code.split("-")[0].lower()
+    return _LOCALE_TO_LANGUAGE.get(base_code, _DEFAULT_LANGUAGE)
+
 
 class MediaPreferences(BaseModel):
     """User's media download preferences.
@@ -46,7 +75,7 @@ class UserProfile(BaseModel):
     name: str | None = None
     created_at: datetime
     updated_at: datetime
-    reply_language: str = "english"
+    reply_language: str = "English"
     confirmation_mode: Literal["always", "never"] = "always"
     media_preferences: MediaPreferences = MediaPreferences()
     notes: list[str] = []
@@ -94,11 +123,13 @@ class ProfileManager:
             notes=[],
         )
 
-    async def get(self, user_id: int) -> UserProfile:
+    async def get(self, user_id: int, *, language_code: str | None = None) -> UserProfile:
         """Get or create user profile from the database.
 
         Args:
             user_id: Telegram user ID to retrieve profile for.
+            language_code: Optional Telegram locale code for auto-detecting
+                reply language on first profile creation. Ignored for existing profiles.
 
         Returns:
             User profile from database or newly created default profile.
@@ -131,8 +162,14 @@ class ProfileManager:
         # Create default profile for new user using the stored template
         logger.info("Creating default profile for user %s", user_id)
         now = datetime.now()
+        reply_language = resolve_language(language_code)
         new_profile = self.default_profile.model_copy(
-            update={"user_id": user_id, "created_at": now, "updated_at": now}
+            update={
+                "user_id": user_id,
+                "created_at": now,
+                "updated_at": now,
+                "reply_language": reply_language,
+            }
         )
         await self.save(new_profile)
         return new_profile

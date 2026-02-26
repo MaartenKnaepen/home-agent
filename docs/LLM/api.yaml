@@ -96,10 +96,15 @@ modules:
         signature: "__init__(db_path: str | Path, *, default_profile: UserProfile | None = None)"
         description: "CRUD operations for user profiles with automatic default profile creation for new users."
 
+      - name: "resolve_language"
+        type: "function"
+        signature: "(language_code: str | None) -> str"
+        description: "Map a Telegram language_code (ISO 639-1, e.g. 'nl', 'en-US') to a human-readable language name. Handles region suffixes and None. Falls back to 'English' for unknown codes."
+
       - name: "ProfileManager.get"
         type: "method"
-        signature: "async (user_id: int) -> UserProfile"
-        description: "Get user profile from DB, or create and persist a default one if not found."
+        signature: "async (user_id: int, *, language_code: str | None = None) -> UserProfile"
+        description: "Get user profile from DB, or create and persist a default one if not found. On new user creation, resolves reply_language from language_code via resolve_language(). Ignored for existing profiles."
 
       - name: "ProfileManager.save"
         type: "method"

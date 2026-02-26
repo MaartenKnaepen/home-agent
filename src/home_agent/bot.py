@@ -86,8 +86,9 @@ def make_message_handler(
 
         text = update.message.text or ""
 
-        # Load user profile
-        user_profile = await profile_manager.get(user_id)
+        # Load user profile, seeding language for new users from Telegram locale
+        language_code = update.effective_user.language_code
+        user_profile = await profile_manager.get(user_id, language_code=language_code)
 
         # Load and convert conversation history to PydanticAI ModelMessage objects
         raw_history = await history_manager.get_history(user_id=user_id)
