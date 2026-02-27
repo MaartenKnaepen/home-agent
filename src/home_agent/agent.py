@@ -45,6 +45,8 @@ class AgentDeps:
 def create_agent(
     toolsets: list[Any] | None = None,
     model: str = "openrouter:qwen/qwq-32b:free",
+    max_retries: int = 3,
+    base_delay: float = 1.0,
 ) -> Agent[AgentDeps, str]:
     """Create a PydanticAI agent with optional MCP toolsets.
 
@@ -53,12 +55,21 @@ def create_agent(
             If None, the agent runs without MCP tools (useful for tests).
         model: PydanticAI model string to use. Defaults to qwen/qwq-32b:free.
             Override via the LLM_MODEL environment variable in production.
+        max_retries: Maximum number of retries on HTTP 429 rate limit errors.
+            Defaults to 3.
+        base_delay: Base delay in seconds for exponential backoff. Doubles each retry.
+            Defaults to 1.0.
 
     Returns:
         Configured Agent instance with system prompt and tools registered.
     """
+    from home_agent.models.retry_model import RetryingModel
+
+    # Pass the model string directly so the provider (and its API-key check) is
+    # resolved lazily on the first request, honouring defer_model_check behaviour.
+    retrying_model = RetryingModel(model, max_retries=max_retries, base_delay=base_delay)
     agent_instance: Agent[AgentDeps, str] = Agent(
-        model,
+        retrying_model,
         deps_type=AgentDeps,
         defer_model_check=True,
         toolsets=toolsets or [],
@@ -103,6 +114,13 @@ def create_agent(
             "Always reply in the language specified in your context (reply_language). "
             "If the user asks you to switch language, call set_reply_language with the new language "
             "name (e.g. 'Dutch', 'French') and switch immediately in your next reply.\n"
+            "\n"
+            "## Tool Usage\n"
+            "NEVER use raw_request for any purpose. It is disabled. "
+            "Always use the dedicated tools: search_media, request_media, get_request.\n"
+            "When requesting a TV series with request_media, you MUST include a 'seasons' "
+            "parameter. Ask the user which seasons they want: all seasons, or specific ones "
+            "(e.g. [1, 2, 3]). Pass 'all' or a list of season numbers.\n"
             "\n"
             "## Preferences\n"
             "If the user expresses preferences, habits, or personal details worth remembering, "

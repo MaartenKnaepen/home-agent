@@ -1,0 +1,316 @@
+step: "2.7b"
+name: "Rate Limit Retry Wrapper"
+goal: >
+  Add a PydanticAI model wrapper that transparently retries requests on 429
+  rate-limit errors with exponential backoff. Max retries are configurable via
+  .env. The wrapper notifies the user via Telegram while waiting. Tool calls
+  that already completed are NOT retried to avoid double-requests.
+
+motivation: >
+  The free-tier OpenRouter models (and even paid ones during peak load) return
+  HTTP 429. Without a retry mechanism, the user gets a generic error message.
+  With the wrapper, transient rate limits are invisible to the user and the
+  conversation continues naturally.
+
+architecture:
+  approach: >
+    Implement a PydanticAI Model wrapper (src/home_agent/models/retry_model.py)
+    that wraps any Model instance and intercepts ModelHTTPError with status 429.
+    On 429, it waits with exponential backoff and retries transparently.
+    The wrapper is injected into create_agent() in agent.py.
+
+  why_wrapper_not_bot_level: >
+    A bot-level retry would restart agent.run() entirely, risking double
+    tool-call execution (e.g. request_media called twice). A model-level
+    wrapper intercepts ONLY the LLM call, not tool execution, so it is safe
+    regardless of whether tools have run. PydanticAI's Model protocol is
+    the correct extension point.
+
+  notification: >
+    The wrapper cannot send Telegram messages itself (no access to Update).
+    Instead, bot.py catches a new RetryNotification exception that carries
+    the "retrying" message, sends it to the user, then resumes. Actually,
+    this is complex. Simpler: the wrapper logs + sleeps silently.
+    The bot sends a "⏳ The AI service is busy, please wait..." typing
+    indicator while waiting. Implemented via a callback passed into the wrapper.
+
+  callback_design: >
+    RetryingModel accepts an optional async on_retry callback:
+      async def on_retry(attempt: int, wait_seconds: float) -> None
+    bot.py passes a closure that sends a typing indicator + optional message.
+    This keeps the model wrapper decoupled from Telegram.
+
+tasks:
+  - id: "2.7b-1"
+    name: "Add config fields for retry settings"
+    files:
+      - src/home_agent/config.py
+      - .env.example
+    description: >
+      Add two new fields to AppConfig:
+        llm_max_retries: int = 3         # max retry attempts on 429
+        llm_retry_base_delay: float = 1.0  # base delay in seconds (doubles each retry)
+      Add to .env.example with comments.
+      Add to AppConfig docstring.
+
+  - id: "2.7b-2"
+    name: "Create RetryingModel wrapper"
+    files:
+      - src/home_agent/models/__init__.py
+      - src/home_agent/models/retry_model.py
+    description: >
+      Create src/home_agent/models/ package with a RetryingModel class.
+
+      RetryingModel wraps any pydantic_ai.models.Model and retries on 429.
+
+      Implementation:
+        from __future__ import annotations
+
+        import asyncio
+        import logging
+        from collections.abc import AsyncIterator, Callable, Coroutine
+        from typing import Any
+
+        from pydantic_ai.exceptions import ModelHTTPError
+        from pydantic_ai.models import (
+            Model,
+            ModelRequestParameters,
+            ModelResponse,
+            StreamedResponse,
+        )
+        from pydantic_ai.settings import ModelSettings
+
+        logger = logging.getLogger(__name__)
+
+        OnRetryCallback = Callable[[int, float], Coroutine[Any, Any, None]]
+
+
+        class RetryingModel(Model):
+            """A PydanticAI Model wrapper that retries on HTTP 429 with exponential backoff.
+
+            Attributes:
+                inner: The wrapped model to delegate requests to.
+                max_retries: Maximum number of retry attempts after the first failure.
+                base_delay: Initial wait time in seconds; doubles on each attempt.
+                on_retry: Optional async callback invoked before each retry.
+                    Receives (attempt_number, wait_seconds).
+            """
+
+            def __init__(
+                self,
+                inner: Model,
+                *,
+                max_retries: int = 3,
+                base_delay: float = 1.0,
+                on_retry: OnRetryCallback | None = None,
+            ) -> None:
+                self.inner = inner
+                self.max_retries = max_retries
+                self.base_delay = base_delay
+                self.on_retry = on_retry
+
+            @property
+            def model_name(self) -> str:
+                """Return the inner model's name."""
+                return self.inner.model_name
+
+            async def request(
+                self,
+                messages: list[Any],
+                model_settings: ModelSettings | None,
+                model_request_parameters: ModelRequestParameters,
+            ) -> ModelResponse:
+                """Delegate to inner model, retrying on 429 with exponential backoff.
+
+                Args:
+                    messages: Conversation messages to send.
+                    model_settings: Optional model settings.
+                    model_request_parameters: Request parameters including tools.
+
+                Returns:
+                    The model response.
+
+                Raises:
+                    ModelHTTPError: If all retries are exhausted.
+                """
+                delay = self.base_delay
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        return await self.inner.request(
+                            messages, model_settings, model_request_parameters
+                        )
+                    except ModelHTTPError as exc:
+                        if exc.status_code != 429 or attempt >= self.max_retries:
+                            raise
+                        logger.warning(
+                            "Rate limited (429) on attempt %d/%d, retrying in %.1fs",
+                            attempt + 1,
+                            self.max_retries + 1,
+                            delay,
+                        )
+                        if self.on_retry is not None:
+                            await self.on_retry(attempt + 1, delay)
+                        await asyncio.sleep(delay)
+                        delay *= 2
+                raise AssertionError("unreachable")  # pragma: no cover
+
+            async def request_stream(
+                self,
+                messages: list[Any],
+                model_settings: ModelSettings | None,
+                model_request_parameters: ModelRequestParameters,
+            ) -> AsyncIterator[StreamedResponse]:
+                """Delegate stream requests to inner model without retry.
+
+                Streaming is not retried because partial responses cannot be replayed.
+
+                Args:
+                    messages: Conversation messages to send.
+                    model_settings: Optional model settings.
+                    model_request_parameters: Request parameters including tools.
+
+                Yields:
+                    Streamed response chunks from the inner model.
+                """
+                async for chunk in self.inner.request_stream(
+                    messages, model_settings, model_request_parameters
+                ):
+                    yield chunk
+
+      Import-linter: models package must not import agent, bot, or main.
+      Add models to pyproject.toml Layer 2 contract:
+        source_modules = ["home_agent.tools", "home_agent.mcp", "home_agent.models"]
+
+  - id: "2.7b-3"
+    name: "Wire RetryingModel into create_agent() and bot.py"
+    files:
+      - src/home_agent/agent.py
+      - src/home_agent/bot.py
+    description: >
+      In agent.py, update create_agent() to accept max_retries and base_delay:
+
+        def create_agent(
+            toolsets: list[Any] | None = None,
+            model: str = "openrouter:qwen/qwq-32b:free",
+            max_retries: int = 3,
+            base_delay: float = 1.0,
+        ) -> Agent[AgentDeps, str]:
+
+      Inside create_agent(), wrap the model:
+        from pydantic_ai.models.openai import OpenAIModel
+        from home_agent.models.retry_model import RetryingModel
+
+        # Parse the model string into a PydanticAI Model instance
+        # PydanticAI accepts string model names directly in Agent(), but for
+        # wrapping we need to instantiate the inner model explicitly.
+        # Use pydantic_ai.models.infer_model() to resolve the string.
+        from pydantic_ai.models import infer_model
+        inner_model = infer_model(model)
+        retrying_model = RetryingModel(
+            inner_model,
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+        agent_instance = Agent(
+            retrying_model,
+            ...
+        )
+
+      In main.py, pass config values to create_agent():
+        agent = create_agent(
+            toolsets=toolsets,
+            model=config.llm_model,
+            max_retries=config.llm_max_retries,
+            base_delay=config.llm_retry_base_delay,
+        )
+
+      In bot.py, pass an on_retry callback to the agent via... wait.
+      The on_retry callback needs access to the Telegram update to send a
+      message. The RetryingModel is created at startup, before any update
+      exists. So the callback cannot be injected at construction time.
+
+      REVISED APPROACH: The on_retry callback is NOT set at construction time.
+      Instead, bot.py wraps agent.run() and catches ModelHTTPError 429
+      at the bot level ONLY for the purpose of sending a user notification,
+      while the RetryingModel handles the actual retry silently. This means:
+
+      - RetryingModel retries silently (no callback needed for now)
+      - bot.py catches the FINAL ModelHTTPError (after all retries exhausted)
+        and sends: "⏳ The AI service is temporarily busy. Please try again
+        in a moment."
+      - This is simpler and correct.
+
+      Update bot.py handle_message:
+        from pydantic_ai.exceptions import ModelHTTPError
+
+        try:
+            result = await agent.run(text, deps=deps, message_history=message_history)
+            reply = result.output
+        except ModelHTTPError as exc:
+            if exc.status_code == 429:
+                logger.warning("Rate limit exhausted for user %d after retries", user_id)
+                await update.message.reply_text(
+                    "⏳ The AI service is temporarily busy. Please try again in a moment."
+                )
+            else:
+                logger.error("Model HTTP error for user %d: %s", user_id, exc, exc_info=True)
+                await update.message.reply_text("Sorry, something went wrong processing your request.")
+            return
+        except Exception as exc:
+            logger.error("Agent.run() failed for user %d: %s", user_id, exc, exc_info=True)
+            await update.message.reply_text("Sorry, something went wrong processing your request.")
+            return
+
+  - id: "2.7b-4"
+    name: "Write tests"
+    files:
+      - tests/test_retry_model.py
+      - tests/test_bot.py  (update)
+      - tests/test_main.py (update)
+    description: >
+      Create tests/test_retry_model.py:
+
+      1. test_retrying_model_succeeds_on_first_try:
+         Inner model returns normally, RetryingModel returns same result.
+
+      2. test_retrying_model_retries_on_429:
+         Inner model raises ModelHTTPError(429) twice then succeeds.
+         RetryingModel retries and returns the success result.
+         Verify asyncio.sleep was called twice with increasing delays.
+
+      3. test_retrying_model_raises_after_max_retries:
+         Inner model always raises 429. After max_retries+1 attempts,
+         RetryingModel raises ModelHTTPError.
+
+      4. test_retrying_model_does_not_retry_non_429:
+         Inner model raises ModelHTTPError(500). RetryingModel raises
+         immediately without retry.
+
+      5. test_retrying_model_calls_on_retry_callback:
+         on_retry callback is called once per retry with correct args.
+
+      6. test_retrying_model_name_delegates_to_inner:
+         model_name property returns inner.model_name.
+
+      Update test_bot.py:
+      - test_rate_limit_sends_busy_message: mock agent.run to raise
+        ModelHTTPError(429), verify reply_text called with busy message.
+
+      Update test_main.py:
+      - test_main_passes_retry_config_to_create_agent: verify create_agent
+        called with max_retries=config.llm_max_retries and
+        base_delay=config.llm_retry_base_delay.
+
+      Update test_config.py:
+      - test_retry_config_defaults: llm_max_retries=3, llm_retry_base_delay=1.0
+
+verification:
+  command: "bash verify.sh"
+  expected: "All tests pass, ty clean, import-linter contracts all kept"
+
+notes:
+  - "pydantic_ai.models.infer_model() may or may not exist — check the API first"
+  - "If infer_model() doesn't exist, use KnownModelName type and let Agent() wrap it"
+  - "RetryingModel.request_stream() is not retried — streaming is stateful"
+  - "The on_retry callback design can be extended later to send Telegram notifications"
+  - "llm_retry_base_delay is float to allow sub-second values (e.g. 0.5) in tests"
