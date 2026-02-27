@@ -74,11 +74,11 @@ forbidden_modules = [
     "home_agent.mcp",
 ]
 
-# Layer 2 — tools and mcp: no imports from agent, bot, or main
+# Layer 2 — tools, mcp and models: no imports from agent, bot, or main
 [[tool.importlinter.contracts]]
-name = "tools and mcp do not import agent or bot"
+name = "tools, mcp and models do not import agent or bot"
 type = "forbidden"
-source_modules = ["home_agent.tools", "home_agent.mcp"]
+source_modules = ["home_agent.tools", "home_agent.mcp", "home_agent.models"]
 forbidden_modules = [
     "home_agent.agent",
     "home_agent.bot",
@@ -114,6 +114,7 @@ source_modules = [
     "home_agent.bot",
     "home_agent.mcp",
     "home_agent.tools",
+    "home_agent.models",
 ]
 forbidden_modules = ["home_agent.main"]
 

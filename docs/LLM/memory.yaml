@@ -8,11 +8,11 @@ last_updated: "2026-02-27"
 
 current_state:
   phase: 2
-  step: "2.7"
-  name: "Wire & Verify UX Flow"
-  status: "complete — Phase 2 done"
+  step: "2.7b"
+  name: "Rate Limit Retry Wrapper"
+  status: "complete"
   next_step: "3.1 — Rich Telegram Formatting (or Docker redeploy to pick up Phase 2 changes)"
-  description: "Phase 2 (User Experience & Profile) complete. All 7 steps (2.1–2.7) done. Profile tools registered on agent in create_agent(). Five new integration tests verify end-to-end UX flows: locale auto-detect, profile deps forwarding, tool persistence via TestModel, confirmation_mode passthrough, and language switch persistence. 96 tests pass, ty clean, 7/7 import-linter contracts green."
+  description: "RetryingModel wrapper added in src/home_agent/models/retry_model.py. Transparently retries LLM requests on HTTP 429 with exponential backoff (configurable via LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY). Lazy model resolution from string via infer_model(). bot.py catches final 429 after retries exhausted and sends user-friendly busy message. 104 tests pass, ty clean, 7/7 import-linter contracts green."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -43,6 +43,11 @@ current_state:
     - "patched main.py volume-mounted into jellyseerr-mcp container — disables DNS rebinding protection and binds to 0.0.0.0"
     - "PYTHONPATH=/app/src in Dockerfile runtime stage — required because uv installs as editable"
     - "Compose run command: docker compose -f deployment/docker-compose.yml --env-file .env up -d"
+    - "RetryingModel wrapper in src/home_agent/models/retry_model.py — retries LLM requests on HTTP 429 with exponential backoff"
+    - "Lazy model resolution from string via infer_model() — defers API key validation until first request"
+    - "Config fields llm_max_retries (int=3) and llm_retry_base_delay (float=1.0) in AppConfig"
+    - "bot.py catches ModelHTTPError 429 after retries exhausted, sends '⏳ The AI service is temporarily busy' message"
+    - "Import-linter: home_agent.models package in Layer 2 and Layer 4 contracts"
     - "Old profiles with removed fields (NotificationPrefs, stats, old MediaPreferences) migrate seamlessly on next load/save"
     - "Auto-detect reply language from Telegram locale on first profile creation (resolve_language in profile.py)"
     - "ProfileManager.get() accepts language_code kwarg — only used for new user creation, existing profiles unaffected"
@@ -241,6 +246,19 @@ completed_steps:
       - "Language switch assertion checks saved_profile.reply_language != 'English' rather than checking for specific value — TestModel generates synthetic args, not 'Dutch'"
     issues: []
 
+  - step: "2.7b"
+    name: "Rate Limit Retry Wrapper"
+    date: "2026-02-28"
+    summary: "RetryingModel(Model) wrapper in src/home_agent/models/retry_model.py. Accepts Model | str with lazy resolution via infer_model(). Retries on HTTP 429 with exponential backoff (base_delay doubles each retry, up to max_retries). Streaming not retried. Config fields llm_max_retries and llm_retry_base_delay added to AppConfig. create_agent() wraps model in RetryingModel. bot.py catches final 429 and sends user-friendly busy message. 8 new tests across 3 files."
+    decisions:
+      - "Model-level retry (not bot-level) — avoids double tool execution risk; only the LLM call is retried"
+      - "Accepts Model | str with lazy resolution via infer_model() — defers provider API-key validation, cleaner than plan's pre-resolution approach"
+      - "request_stream uses @asynccontextmanager (not async for) — matches PydanticAI Model protocol correctly"
+      - "on_retry callback uses 0-indexed attempt (more Pythonic than plan's 1-indexed)"
+      - "Unreachable sentinel uses RuntimeError instead of AssertionError — better semantics"
+      - "bot.py catches ModelHTTPError before generic Exception — distinct 429 vs other HTTP error handling"
+    issues: []
+
   - step: "1.10"
     name: "Docker Deployment"
     date: "2026-02-24"
@@ -415,3 +433,11 @@ lessons_learned:
     problem: "python-telegram-bot logs 'No error handlers are registered' and swallows exceptions from message handlers. Agent errors, MCP failures, and Telegram API errors all disappear silently."
     resolution: "Added app.add_error_handler(_error_handler) in create_application(). Also added try/except around agent.run() with explicit error logging and user-facing error message. Added guard for empty reply (if not reply:) since some free LLM models return empty strings after tool use."
     takeaway: "Always register an error handler with python-telegram-bot. Always wrap agent.run() in try/except. Always guard against empty output from the model."
+
+  - id: "LL-008"
+    title: "Free-tier OpenRouter models frequently return HTTP 429 — model-level retry is essential"
+    date: "2026-02-28"
+    context: "Running home-agent with openrouter:qwen/qwq-32b:free on free tier ($10 top-up for 1000 requests/day)"
+    problem: "Free-tier models return HTTP 429 rate limit errors frequently, especially during peak load. Without retry, users see generic error messages and must manually retry. Bot-level retry (re-running agent.run()) risks double-executing tool calls like request_media."
+    resolution: "Implemented RetryingModel as a PydanticAI Model wrapper that intercepts only the LLM call (not tool execution). Uses exponential backoff (1s, 2s, 4s) with configurable max_retries=3. Bot catches the final 429 after all retries are exhausted and sends a user-friendly busy message. Model-level interception is the correct extension point because it avoids replaying tool calls."
+    takeaway: "For free-tier LLM APIs, always add retry with exponential backoff at the model level, not the agent/bot level. PydanticAI's Model protocol is the right extension point — it intercepts only the LLM call, not tool execution, avoiding double side effects."

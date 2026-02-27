@@ -80,3 +80,10 @@ def test_zero_profile_id_raises_validation_error(mock_env: None) -> None:
             allowed_telegram_ids=[123],
             jellyseerr_1080p_profile_id=0,
         )
+
+
+def test_retry_config_defaults(mock_env: None) -> None:
+    """Retry config fields have correct defaults."""
+    config = AppConfig()
+    assert config.llm_max_retries == 3
+    assert config.llm_retry_base_delay == 1.0

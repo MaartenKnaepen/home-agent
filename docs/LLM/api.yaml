@@ -37,6 +37,16 @@ modules:
         signature: "(cls, v: int | None) -> int | None"
         description: "Pydantic field_validator for jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id. Rejects zero and negative values."
 
+      - name: "AppConfig.llm_max_retries"
+        type: "field"
+        signature: "int = 3"
+        description: "Maximum number of retries on HTTP 429 rate limit errors. Override via LLM_MAX_RETRIES env var."
+
+      - name: "AppConfig.llm_retry_base_delay"
+        type: "field"
+        signature: "float = 1.0"
+        description: "Base delay in seconds for exponential backoff on retries. Doubles each retry. Override via LLM_RETRY_BASE_DELAY env var."
+
       - name: "get_config"
         type: "function"
         signature: "() -> AppConfig"
@@ -167,8 +177,8 @@ modules:
 
       - name: "create_agent"
         type: "function"
-        signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free') -> Agent[AgentDeps, str]"
-        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static system prompt (## Media Requests with SEARCH→DISAMBIGUATE→QUALITY→CONFIRM flow, ## Language, ## Preferences), dynamic system prompt (## Current User Context), update_user_note tool, and 4 profile tools."
+        signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free', max_retries: int = 3, base_delay: float = 1.0) -> Agent[AgentDeps, str]"
+        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static system prompt (## Media Requests with SEARCH→DISAMBIGUATE→QUALITY→CONFIRM flow, ## Language, ## Preferences), dynamic system prompt (## Current User Context), update_user_note tool, 4 profile tools, and RetryingModel wrapper for 429 rate limit retry."
 
       - name: "inject_user_profile"
         type: "function"
@@ -287,6 +297,42 @@ modules:
         type: "method"
         signature: "() -> list[str]"
         description: "Get list of enabled server names."
+
+  # ── src/home_agent/models/__init__.py ─────────────────────────────────────
+  - module: "src/home_agent/models/__init__.py"
+    exports:
+      - name: "models"
+        type: "package"
+        signature: ""
+        description: "Custom PydanticAI model wrappers package."
+
+  # ── src/home_agent/models/retry_model.py ────────────────────────────────────
+  - module: "src/home_agent/models/retry_model.py"
+    exports:
+      - name: "OnRetryCallback"
+        type: "type alias"
+        signature: "Callable[[int, float], Coroutine[Any, Any, None]]"
+        description: "Type alias for the async on_retry callback. Receives (attempt: int, wait_seconds: float)."
+
+      - name: "RetryingModel"
+        type: "class"
+        signature: "Model"
+        description: "PydanticAI Model wrapper that retries on HTTP 429 with exponential backoff. Accepts Model | str (lazy resolution via infer_model). Delegates system, model_name, request_stream to inner model. Streaming is not retried."
+
+      - name: "RetryingModel.__init__"
+        type: "method"
+        signature: "(inner: Model | str, *, max_retries: int = 3, base_delay: float = 1.0, on_retry: OnRetryCallback | None = None) -> None"
+        description: "Wrap an inner model (or model name string) with retry logic. String models are resolved lazily via infer_model() on first request."
+
+      - name: "RetryingModel.request"
+        type: "method"
+        signature: "async (messages: list[ModelMessage], model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters) -> ModelResponse"
+        description: "Delegate to inner model, retrying on 429 with exponential backoff up to max_retries times. Non-429 errors propagate immediately."
+
+      - name: "RetryingModel.request_stream"
+        type: "method"
+        signature: "async (messages: list[ModelMessage], model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters) -> AsyncIterator[StreamedResponse]"
+        description: "Delegate streaming request to inner model without retry. Uses @asynccontextmanager."
 
   # ── mcp_servers/jellyseerr/main.py ─────────────────────────────────────────
   - module: "mcp_servers/jellyseerr/main.py"

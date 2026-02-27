@@ -470,6 +470,52 @@ phases:
       DB
 
       '
+  - files:
+    - src/home_agent/models/__init__.py
+    - src/home_agent/models/retry_model.py
+    - src/home_agent/config.py
+    - src/home_agent/agent.py
+    - src/home_agent/bot.py
+    - src/home_agent/main.py
+    - .env.example
+    - pyproject.toml
+    - tests/test_retry_model.py
+    - tests/test_config.py
+    - tests/test_bot.py
+    goal: Transparently retry LLM requests on HTTP 429 rate limit errors with exponential
+      backoff, so transient rate limits are invisible to the user.
+    id: '2.7b'
+    name: Rate Limit Retry Wrapper
+    notes: 'RetryingModel wraps any PydanticAI Model and intercepts ModelHTTPError 429.
+      Accepts Model | str with lazy resolution via infer_model(). request_stream() is
+      not retried (streaming is stateful). bot.py catches final 429 after retries
+      exhausted and sends user-friendly busy message. on_retry callback supported for
+      future Telegram notification extension.'
+    scope: "- RetryingModel(Model) wrapper in src/home_agent/models/retry_model.py\n\
+      - Exponential backoff: base_delay doubles each retry up to max_retries\n\
+      - Lazy model resolution from string via infer_model() for deferred API key validation\n\
+      - Config fields: llm_max_retries (int=3), llm_retry_base_delay (float=1.0)\n\
+      - create_agent() accepts max_retries/base_delay, wraps model in RetryingModel\n\
+      - bot.py catches ModelHTTPError 429 after retries exhausted, sends busy message\n\
+      - Import-linter: home_agent.models added to Layer 2 and Layer 4 contracts\n"
+    status: done
+    test: '- test_retry_model.py — Successful request returns immediately without retry
+
+      - test_retry_model.py — 429 error triggers retry, success on second attempt
+
+      - test_retry_model.py — Exponential backoff delays: 1.0, 2.0, 4.0
+
+      - test_retry_model.py — Raises after max_retries exhausted with correct call count
+
+      - test_retry_model.py — Non-429 HTTP error (500) raised immediately without retry
+
+      - test_retry_model.py — on_retry callback invoked with correct attempt/delay args
+
+      - test_bot.py — Bot sends busy message when rate limit exhausted
+
+      - test_config.py — Retry config fields have correct defaults
+
+      '
 - focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.
   id: 3
   name: Polish & Advanced Features

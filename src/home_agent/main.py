@@ -73,7 +73,12 @@ async def _async_main() -> None:
     toolsets = get_agent_toolsets(registry)
     logger.info("Creating agent with %d MCP toolsets", len(toolsets))
     logger.info("Using LLM model: %s", config.llm_model)
-    agent = create_agent(toolsets=toolsets, model=config.llm_model)
+    agent = create_agent(
+        toolsets=toolsets,
+        model=config.llm_model,
+        max_retries=config.llm_max_retries,
+        base_delay=config.llm_retry_base_delay,
+    )
 
     # Open MCP connections once for the lifetime of the bot
     async with agent:

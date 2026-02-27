@@ -26,6 +26,8 @@ class AppConfig(BaseSettings):
             None means use Jellyseerr's default profile.
         jellyseerr_1080p_profile_id: Jellyseerr quality profile ID for 1080p requests.
             None means use Jellyseerr's default profile.
+        llm_max_retries: Maximum number of retries on HTTP 429 rate limit errors.
+        llm_retry_base_delay: Base delay in seconds for exponential backoff on retries.
     """
 
     telegram_bot_token: SecretStr
@@ -39,6 +41,8 @@ class AppConfig(BaseSettings):
     mcp_port: int = 5056
     jellyseerr_4k_profile_id: int | None = None
     jellyseerr_1080p_profile_id: int | None = None
+    llm_max_retries: int = 3
+    llm_retry_base_delay: float = 1.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -156,6 +156,34 @@ async def test_new_user_gets_language_from_locale(
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_sends_busy_message(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """Bot sends busy message when rate limit is exhausted."""
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(
+        side_effect=ModelHTTPError(
+            status_code=429,
+            model_name="test-model",
+            body={"message": "rate limited"},
+        )
+    )
+
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    update = make_test_update("add Inception", user_id=123)
+    await handler(update, MagicMock())
+
+    update.message.reply_text.assert_called_once()
+    call_arg = update.message.reply_text.call_args[0][0]
+    assert "busy" in call_arg.lower() or "temporarily" in call_arg.lower()
+
+
+@pytest.mark.asyncio
 async def test_existing_user_language_not_overwritten(
     mock_config: AppConfig, test_db: Path
 ) -> None:

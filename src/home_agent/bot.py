@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from telegram import Update
 from telegram.constants import ChatAction
@@ -116,8 +117,20 @@ def make_message_handler(
             result = await agent.run(text, deps=deps, message_history=message_history)
             reply = result.output
             logger.info("Agent output for user %d: %r", user_id, reply[:200] if reply else reply)
-        except Exception as e:
-            logger.error("Agent.run() failed for user %d: %s", user_id, e, exc_info=True)
+        except ModelHTTPError as exc:
+            if exc.status_code == 429:
+                logger.warning("Rate limit exhausted for user %d after retries", user_id)
+                await update.message.reply_text(
+                    "⏳ The AI service is temporarily busy. Please try again in a moment."
+                )
+            else:
+                logger.error("Model HTTP error for user %d: %s", user_id, exc, exc_info=True)
+                await update.message.reply_text(
+                    "Sorry, something went wrong processing your request."
+                )
+            return
+        except Exception as exc:
+            logger.error("Agent.run() failed for user %d: %s", user_id, exc, exc_info=True)
             await update.message.reply_text("Sorry, something went wrong processing your request.")
             return
 
