@@ -28,6 +28,7 @@ class AppConfig(BaseSettings):
             None means use Jellyseerr's default profile.
         llm_max_retries: Maximum number of retries on HTTP 429 rate limit errors.
         llm_retry_base_delay: Base delay in seconds for exponential backoff on retries.
+        llm_retry_max_delay: Maximum delay in seconds for exponential backoff (caps the doubling).
     """
 
     telegram_bot_token: SecretStr
@@ -43,6 +44,7 @@ class AppConfig(BaseSettings):
     jellyseerr_1080p_profile_id: int | None = None
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 1.0
+    llm_retry_max_delay: float = 30.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

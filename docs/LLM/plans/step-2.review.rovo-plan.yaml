@@ -1,0 +1,242 @@
+step: "2.review"
+name: "Phase 1 & 2 Review Fixes"
+description: >
+  Implement all fixes and improvements identified in docs/LLM/reviews/phase-1-2-review.md.
+  Covers: timezone-aware datetimes, Telegram message splitting, dead code removal,
+  inconsistent profile mutation, DB index, history conversion extraction,
+  retry backoff cap (as env var), import-linter gap fixes, and test cleanup.
+files:
+  - src/home_agent/config.py
+  - src/home_agent/db.py
+  - src/home_agent/profile.py
+  - src/home_agent/agent.py
+  - src/home_agent/bot.py
+  - src/home_agent/history.py
+  - src/home_agent/models/retry_model.py
+  - src/home_agent/tools/profile_tools.py
+  - pyproject.toml
+  - deployment/docker-compose.yml
+  - tests/test_config.py
+  - tests/test_bot.py
+  - tests/test_db.py
+  - tests/test_history.py
+  - tests/test_profile.py
+  - tests/test_retry_model.py
+  - tests/conftest.py
+
+tasks:
+
+  # ─── HIGH PRIORITY ───────────────────────────────────────────────────────────
+
+  - id: "R-01"
+    priority: high
+    title: "Timezone-aware datetimes throughout"
+    description: >
+      All datetime.now() calls use naive datetimes. Replace with datetime.now(tz=timezone.utc).
+      Import timezone from datetime module.
+    files:
+      - src/home_agent/profile.py
+    changes:
+      - "Add 'from datetime import datetime, timezone' import"
+      - "Replace ALL datetime.now() with datetime.now(tz=timezone.utc) in profile.py"
+      - "Affects _create_default_profile() (lines 115, 119, 120), get() (lines 155-157, 163-170), save() (line 182)"
+    tests:
+      - "test_profile.py — verify created_at is timezone-aware (tzinfo is not None)"
+      - "test_profile.py — verify roundtrip through JSON preserves tz-aware datetime"
+
+  - id: "R-02"
+    priority: high
+    title: "Telegram message splitting (4096 char limit)"
+    description: >
+      Telegram's reply_text() fails silently or raises for messages > 4096 chars.
+      Add a helper that splits long text into chunks and sends them sequentially.
+      Keep all Telegram logic in bot.py.
+    files:
+      - src/home_agent/bot.py
+      - tests/test_bot.py
+    changes:
+      - "Add _split_message(text: str, max_length: int = 4096) -> list[str] helper function"
+      - "Replace 'await update.message.reply_text(reply)' with loop over _split_message(reply)"
+      - "Ensure each chunk is sent sequentially, not concurrently"
+    tests:
+      - "test_bot.py — test_long_reply_is_split: agent returning 5000-char string sends 2 reply_text calls"
+      - "test_bot.py — test_short_reply_is_not_split: normal reply sends exactly 1 reply_text call"
+
+  - id: "R-03"
+    priority: high
+    title: "Remove dead run_bot() function from bot.py"
+    description: >
+      run_bot() is never called — main.py uses create_application() + manual async lifecycle.
+      run_bot() uses run_polling() which conflicts with the 'async with app:' pattern.
+      Remove it entirely. Update any imports/references if they exist.
+    files:
+      - src/home_agent/bot.py
+      - tests/test_bot.py
+    changes:
+      - "Delete the run_bot() function (lines 179-196)"
+      - "Remove any test for run_bot() in test_bot.py if one exists"
+
+  # ─── MEDIUM PRIORITY ─────────────────────────────────────────────────────────
+
+  - id: "R-04"
+    priority: medium
+    title: "Add DB index on conversations.user_id"
+    description: >
+      get_history() queries by user_id without an index. Add CREATE INDEX IF NOT EXISTS
+      to init_db() so history lookups scale as the table grows.
+    files:
+      - src/home_agent/db.py
+      - tests/test_db.py
+    changes:
+      - "Add 'CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)' in init_db() after table creation"
+    tests:
+      - "test_db.py — test_db_has_user_id_index: after init_db, query sqlite_master for the index and assert it exists"
+
+  - id: "R-05"
+    priority: medium
+    title: "Standardize profile mutation pattern across all tools"
+    description: >
+      set_movie_quality and set_series_quality mutate nested media_preferences via
+      model_copy() but do NOT reassign ctx.deps.user_profile — they leave deps pointing
+      to the old top-level object. set_reply_language and set_confirmation_mode do use
+      model_copy() + reassign. Standardize ALL four tools to:
+        1. Create new profile via top-level model_copy() with nested update
+        2. Reassign ctx.deps.user_profile = new profile
+        3. Save the new profile
+    files:
+      - src/home_agent/tools/profile_tools.py
+      - tests/test_profile_tools.py
+    changes: >
+      For set_movie_quality:
+        profile = profile.model_copy(update={"media_preferences": profile.media_preferences.model_copy(update={"movie_quality": quality})})
+        ctx.deps.user_profile = profile
+        await ctx.deps.profile_manager.save(profile)
+
+      For set_series_quality: same pattern with series_quality.
+
+      Both set_reply_language and set_confirmation_mode already follow the correct pattern — leave them unchanged.
+    tests:
+      - "test_profile_tools.py — verify ctx.deps.user_profile is updated after set_movie_quality"
+      - "test_profile_tools.py — verify ctx.deps.user_profile is updated after set_series_quality"
+
+  - id: "R-06"
+    priority: medium
+    title: "Fix update_user_note tool to use model_copy() instead of in-place mutation"
+    description: >
+      The update_user_note tool in agent.py calls profile.notes.append(note) which
+      mutates the Pydantic model in-place and does NOT update ctx.deps.user_profile.
+      Fix to use model_copy() + reassign, consistent with other profile tools.
+    files:
+      - src/home_agent/agent.py
+      - tests/test_agent.py
+    changes:
+      - "Replace 'profile.notes.append(note)' with:"
+      - "  profile = profile.model_copy(update={'notes': [*profile.notes, note]})"
+      - "  ctx.deps.user_profile = profile"
+      - "Then: await ctx.deps.profile_manager.save(profile)"
+    tests:
+      - "test_agent.py — test_update_user_note_does_not_mutate_in_place (verify ctx.deps.user_profile.notes updated)"
+
+  - id: "R-07"
+    priority: medium
+    title: "Extract history-to-ModelMessage conversion to history.py"
+    description: >
+      The logic in bot.py (lines 93-106) converting raw DB dicts to ModelRequest/ModelResponse
+      objects is inline and untested. Extract to a reusable function in history.py.
+      Update bot.py to call it. Add a test.
+    files:
+      - src/home_agent/history.py
+      - src/home_agent/bot.py
+      - tests/test_history.py
+    changes:
+      - "Add 'convert_history_to_messages(history: list[dict[str, str]]) -> list[ModelMessage]' function to history.py"
+      - "Import ModelRequest, ModelResponse, TextPart, UserPromptPart in history.py (already imported)"
+      - "bot.py: replace inline loop with 'from home_agent.history import convert_history_to_messages' and one call"
+    tests:
+      - "test_history.py — test_convert_history_empty: empty input returns []"
+      - "test_history.py — test_convert_history_user_role: user role becomes ModelRequest"
+      - "test_history.py — test_convert_history_assistant_role: assistant role becomes ModelResponse"
+      - "test_history.py — test_convert_history_unknown_role_skipped: unknown role is skipped"
+
+  # ─── CONFIGURATION (env var + docker) ────────────────────────────────────────
+
+  - id: "R-08"
+    priority: medium
+    title: "Add llm_retry_max_delay config field (env var + docker-compose)"
+    description: >
+      RetryingModel has no cap on backoff delay. With max_retries=10 and base_delay=1.0,
+      the 10th retry waits 512 seconds. Add llm_retry_max_delay: float = 30.0 to AppConfig,
+      pass it through create_agent() → RetryingModel, and apply it as: delay = min(delay * 2, max_delay).
+      Also document in docker-compose.yml as a commented example env var.
+    files:
+      - src/home_agent/config.py
+      - src/home_agent/agent.py
+      - src/home_agent/models/retry_model.py
+      - deployment/docker-compose.yml
+      - tests/test_config.py
+      - tests/test_retry_model.py
+    changes:
+      - "config.py: add 'llm_retry_max_delay: float = 30.0' field with docstring"
+      - "retry_model.py: add 'max_delay: float = 30.0' param to __init__ and docstring"
+      - "retry_model.py: in request(), change 'delay *= 2' to 'delay = min(delay * 2, self.max_delay)'"
+      - "agent.py: add 'max_delay: float = 30.0' param to create_agent() signature"
+      - "agent.py: pass max_delay to RetryingModel constructor"
+      - "main.py: pass config.llm_retry_max_delay to create_agent()"
+      - "docker-compose.yml: add commented '# - LLM_RETRY_MAX_DELAY=30.0' under home-agent environment"
+    tests:
+      - "test_config.py — test_retry_max_delay_default: config.llm_retry_max_delay == 30.0"
+      - "test_retry_model.py — test_delay_capped_at_max_delay: with base_delay=10, max_delay=15, delays are [10.0, 15.0, 15.0]"
+
+  # ─── IMPORT LINTER GAPS ──────────────────────────────────────────────────────
+
+  - id: "R-09"
+    priority: low
+    title: "Fix import-linter gaps in pyproject.toml"
+    description: >
+      Three gaps identified in the import-linter setup:
+      1. home_agent.models missing from contracts 1 (config), 2 (db), 3 (history) forbidden lists
+      2. home_agent.profile not forbidden in contract 2 (db) — could create circular dep
+      3. No contract preventing profile from importing history (both Layer 1b peers)
+
+      Fix all three gaps.
+    files:
+      - pyproject.toml
+    changes:
+      - "Contract 1 (config is independent): add 'home_agent.models' to forbidden_modules"
+      - "Contract 2 (db only imports config and shared): add 'home_agent.models' and 'home_agent.profile' to forbidden_modules"
+      - "Contract 3 (history only imports config and db): add 'home_agent.models' to forbidden_modules"
+      - "Add new contract: 'profile does not import history' with source=home_agent.profile, forbidden=home_agent.history"
+    tests:
+      - "Run 'lint-imports' and confirm all contracts pass (verify.sh)"
+
+  # ─── TEST CLEANUP ─────────────────────────────────────────────────────────────
+
+  - id: "R-10"
+    priority: low
+    title: "Remove duplicate test_db fixtures from test files"
+    description: >
+      test_db fixture is defined in conftest.py but also re-defined locally in
+      test_history.py and test_profile.py, shadowing the shared one. Remove the
+      local definitions and rely on conftest.py's shared fixture.
+      Verify tests still pass after removal.
+    files:
+      - tests/test_history.py
+      - tests/test_profile.py
+      - tests/conftest.py
+    changes:
+      - "test_history.py: remove local test_db fixture definition"
+      - "test_profile.py: remove local test_db fixture definition"
+      - "conftest.py: verify test_db fixture is present and compatible"
+    tests:
+      - "All test_history.py and test_profile.py tests must still pass"
+
+verification:
+  - "bash verify.sh — ty, lint-imports, pytest all green"
+  - "All 104+ tests pass (new tests added for R-01, R-02, R-04, R-05, R-06, R-07, R-08)"
+  - "No RuntimeWarnings in test output"
+  - "All datetime objects in profile.py use timezone.utc"
+  - "No in-place mutation of Pydantic models in agent.py or profile_tools.py"
+  - "convert_history_to_messages() function exists in history.py"
+  - "llm_retry_max_delay in AppConfig and RetryingModel"
+  - "run_bot() function removed from bot.py"
+  - "8 import-linter contracts all pass (was 7 — new profile/history peer contract added)"

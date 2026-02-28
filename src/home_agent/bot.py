@@ -10,7 +10,6 @@ import logging
 
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -22,12 +21,53 @@ from telegram.ext import (
 
 from home_agent.agent import AgentDeps
 from home_agent.config import AppConfig
-from home_agent.history import HistoryManager
+from home_agent.history import HistoryManager, convert_history_to_messages
 from home_agent.profile import ProfileManager
 
 logger = logging.getLogger(__name__)
 
 _REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
+
+
+def _split_message(text: str, max_length: int = 4096) -> list[str]:
+    """Split a long message into chunks that fit within Telegram's message size limit.
+
+    Splits by newlines first, accumulating lines until a chunk would exceed
+    max_length. If a single line exceeds max_length, it is split at the boundary.
+
+    Args:
+        text: The message text to split.
+        max_length: Maximum number of characters per chunk. Defaults to 4096.
+
+    Returns:
+        A list of string chunks, each at most max_length characters.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in text.splitlines(keepends=True):
+        # If a single line is too long, flush current chunk and split the line
+        while len(line) > max_length:
+            if current:
+                chunks.append("".join(current))
+                current = []
+                current_len = 0
+            chunks.append(line[:max_length])
+            line = line[max_length:]
+
+        if current_len + len(line) > max_length:
+            chunks.append("".join(current))
+            current = []
+            current_len = 0
+
+        current.append(line)
+        current_len += len(line)
+
+    if current:
+        chunks.append("".join(current))
+
+    return chunks or [""]
 
 
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -93,18 +133,7 @@ def make_message_handler(
 
         # Load and convert conversation history to PydanticAI ModelMessage objects
         raw_history = await history_manager.get_history(user_id=user_id)
-        message_history = []
-        for entry in raw_history:
-            role = entry.get("role", "")
-            content = entry.get("content", "")
-            if role == "user":
-                message_history.append(
-                    ModelRequest(parts=[UserPromptPart(content=content)])
-                )
-            elif role == "assistant":
-                message_history.append(
-                    ModelResponse(parts=[TextPart(content=content)])
-                )
+        message_history = convert_history_to_messages(raw_history)
 
         deps = AgentDeps(
             config=config,
@@ -143,7 +172,8 @@ def make_message_handler(
         await history_manager.save_message(user_id=user_id, role="user", content=text)
         await history_manager.save_message(user_id=user_id, role="assistant", content=reply)
 
-        await update.message.reply_text(reply)
+        for chunk in _split_message(reply):
+            await update.message.reply_text(chunk)
         logger.debug("Sent agent reply to user %d", user_id)
 
     return handle_message
@@ -175,23 +205,3 @@ def create_application(
     app.add_error_handler(_error_handler)
     logger.info("Telegram application configured with whitelist: %s", config.allowed_telegram_ids)
     return app
-
-
-def run_bot(
-    config: AppConfig,
-    profile_manager: ProfileManager,
-    history_manager: HistoryManager,
-    agent: Agent[AgentDeps, str],
-) -> None:
-    """Build the Telegram application and start polling for updates.
-
-    Blocks until the bot is stopped (e.g. via Ctrl-C).
-
-    Args:
-        config: Application configuration.
-        profile_manager: Manages user profile persistence.
-        history_manager: Manages conversation history persistence.
-        agent: The PydanticAI agent instance to use for inference.
-    """
-    logger.info("Starting Telegram bot polling…")
-    create_application(config, profile_manager, history_manager, agent).run_polling()

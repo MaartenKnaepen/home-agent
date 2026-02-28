@@ -35,10 +35,10 @@ async def set_movie_quality(
         Confirmation message.
     """
     profile = ctx.deps.user_profile
-    profile.media_preferences = profile.media_preferences.model_copy(
-        update={"movie_quality": quality}
-    )
-    await ctx.deps.profile_manager.save(profile)
+    new_prefs = profile.media_preferences.model_copy(update={"movie_quality": quality})
+    new_profile = profile.model_copy(update={"media_preferences": new_prefs})
+    ctx.deps.user_profile = new_profile
+    await ctx.deps.profile_manager.save(new_profile)
     logger.info("Set movie quality to %s for user %s", quality, profile.user_id)
     return f"Got it! I'll request movies in {quality} from now on."
 
@@ -60,10 +60,10 @@ async def set_series_quality(
         Confirmation message.
     """
     profile = ctx.deps.user_profile
-    profile.media_preferences = profile.media_preferences.model_copy(
-        update={"series_quality": quality}
-    )
-    await ctx.deps.profile_manager.save(profile)
+    new_prefs = profile.media_preferences.model_copy(update={"series_quality": quality})
+    new_profile = profile.model_copy(update={"media_preferences": new_prefs})
+    ctx.deps.user_profile = new_profile
+    await ctx.deps.profile_manager.save(new_profile)
     logger.info("Set series quality to %s for user %s", quality, profile.user_id)
     return f"Got it! I'll request series in {quality} from now on."
 

@@ -78,6 +78,7 @@ async def _async_main() -> None:
         model=config.llm_model,
         max_retries=config.llm_max_retries,
         base_delay=config.llm_retry_base_delay,
+        max_delay=config.llm_retry_max_delay,
     )
 
     # Open MCP connections once for the lifetime of the bot

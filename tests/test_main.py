@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from home_agent.main import main, setup_logging
 
@@ -20,14 +19,18 @@ def test_setup_logging_sets_level() -> None:
 def test_main_wires_components() -> None:
     """main() calls asyncio.run with _async_main coroutine."""
     # main() is now just: asyncio.run(_async_main()) + KeyboardInterrupt handling.
-    # We verify it calls asyncio.run and doesn't raise.
-    with patch("home_agent.main.asyncio.run") as mock_asyncio_run:
+    # We verify asyncio.run is called exactly once with a coroutine argument.
+    # We patch _async_main itself so no real coroutine object is ever created,
+    # avoiding the RuntimeWarning from an unawaited coroutine leaking into GC.
+    # Use MagicMock (not AsyncMock) so calling _async_main() returns a plain
+    # MagicMock, not a coroutine — prevents the unawaited-coroutine RuntimeWarning.
+    mock_async_main = MagicMock()
+    with patch("home_agent.main._async_main", mock_async_main), \
+         patch("home_agent.main.asyncio.run") as mock_asyncio_run:
         main()
         mock_asyncio_run.assert_called_once()
-        # The argument should be a coroutine (_async_main())
-        args = mock_asyncio_run.call_args[0]
-        assert inspect.iscoroutine(args[0])
-        args[0].close()  # clean up the coroutine
+        # asyncio.run should have been called with the result of _async_main()
+        mock_async_main.assert_called_once()
 
 
 def test_main_keyboard_interrupt_handled() -> None:

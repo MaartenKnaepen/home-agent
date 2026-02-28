@@ -12,7 +12,7 @@ import pytest
 from telegram import Chat, Message, Update, User
 from telegram.constants import ChatAction
 
-from home_agent.bot import make_message_handler
+from home_agent.bot import _split_message, make_message_handler
 from home_agent.config import AppConfig
 from home_agent.history import HistoryManager
 from home_agent.profile import ProfileManager
@@ -181,6 +181,45 @@ async def test_rate_limit_sends_busy_message(
     update.message.reply_text.assert_called_once()
     call_arg = update.message.reply_text.call_args[0][0]
     assert "busy" in call_arg.lower() or "temporarily" in call_arg.lower()
+
+
+@pytest.mark.asyncio
+async def test_long_reply_is_split(mock_config: AppConfig, test_db: Path) -> None:
+    """Agent reply exceeding 4096 chars is sent as multiple messages."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
+    long_reply = "a" * 5000
+    mock_result = MagicMock()
+    mock_result.output = long_reply
+
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    update = make_test_update("hello", user_id=123)
+    await handler(update, MagicMock())
+
+    assert update.message.reply_text.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_short_reply_not_split(mock_config: AppConfig, test_db: Path) -> None:
+    """Agent reply within 4096 chars is sent as a single message."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
+    mock_result = MagicMock()
+    mock_result.output = "Short reply"
+
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
+    update = make_test_update("hello", user_id=123)
+    await handler(update, MagicMock())
+
+    update.message.reply_text.assert_called_once()
 
 
 @pytest.mark.asyncio

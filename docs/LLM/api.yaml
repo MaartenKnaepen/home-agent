@@ -42,6 +42,11 @@ modules:
         signature: "int = 3"
         description: "Maximum number of retries on HTTP 429 rate limit errors. Override via LLM_MAX_RETRIES env var."
 
+      - name: "AppConfig.llm_retry_max_delay"
+        type: "field"
+        signature: "float = 30.0"
+        description: "Maximum delay in seconds between LLM retry attempts. Caps exponential backoff. Override via LLM_RETRY_MAX_DELAY env var."
+
       - name: "AppConfig.llm_retry_base_delay"
         type: "field"
         signature: "float = 1.0"
@@ -102,6 +107,11 @@ modules:
         type: "function"
         signature: "(*, n: int) -> Callable[[list[ModelMessage]], list[ModelMessage]]"
         description: "Returns a PydanticAI history_processors-compatible callable that keeps only the last N message pairs."
+
+      - name: "convert_history_to_messages"
+        type: "function"
+        signature: "(history: list[dict[str, str]]) -> list[ModelMessage]"
+        description: "Convert raw DB history records (dicts with 'role' and 'content' keys) to PydanticAI ModelMessage objects. User role → ModelRequest, assistant role → ModelResponse, unknown roles skipped with debug log."
 
   # ── src/home_agent/profile.py ───────────────────────────────────────────────
   - module: "src/home_agent/profile.py"
@@ -177,8 +187,8 @@ modules:
 
       - name: "create_agent"
         type: "function"
-        signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free', max_retries: int = 3, base_delay: float = 1.0) -> Agent[AgentDeps, str]"
-        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static system prompt (## Media Requests with SEARCH→DISAMBIGUATE→QUALITY→CONFIRM flow, ## Language, ## Preferences), dynamic system prompt (## Current User Context), update_user_note tool, 4 profile tools, and RetryingModel wrapper for 429 rate limit retry."
+        signature: "(toolsets: list[Any] | None = None, model: str = 'openrouter:qwen/qwq-32b:free', max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 30.0) -> Agent[AgentDeps, str]"
+        description: "Factory that creates a PydanticAI agent with optional MCP toolsets, sliding-window history processor (n=20), static system prompt (## Media Requests with SEARCH→DISAMBIGUATE→QUALITY→CONFIRM flow, ## Language, ## Preferences), dynamic system prompt (## Current User Context), update_user_note tool, 4 profile tools, and RetryingModel wrapper for 429 rate limit retry (capped at max_delay seconds)."
 
       - name: "inject_user_profile"
         type: "function"
@@ -213,10 +223,10 @@ modules:
         signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent[AgentDeps, str]) -> Application"
         description: "Build and return a configured Telegram Application with message handler and error handler wired. Does NOT start polling."
 
-      - name: "run_bot"
+      - name: "_split_message"
         type: "function"
-        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent[AgentDeps, str]) -> None"
-        description: "Build the Telegram application and start polling for updates. Blocks until stopped."
+        signature: "(text: str, max_length: int = 4096) -> list[str]"
+        description: "Split a long string into chunks of at most max_length characters. Splits on newlines where possible; hard-splits long lines at max_length boundary. Used by handle_message to respect Telegram's 4096-char message limit."
 
   # ── src/home_agent/main.py ──────────────────────────────────────────────────
   - module: "src/home_agent/main.py"
@@ -321,8 +331,8 @@ modules:
 
       - name: "RetryingModel.__init__"
         type: "method"
-        signature: "(inner: Model | str, *, max_retries: int = 3, base_delay: float = 1.0, on_retry: OnRetryCallback | None = None) -> None"
-        description: "Wrap an inner model (or model name string) with retry logic. String models are resolved lazily via infer_model() on first request."
+        signature: "(inner: Model | str, *, max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 30.0, on_retry: OnRetryCallback | None = None) -> None"
+        description: "Wrap an inner model (or model name string) with retry logic. String models are resolved lazily via infer_model() on first request. max_delay caps the exponential backoff (e.g. base_delay=1.0 doubles each retry but never exceeds max_delay seconds)."
 
       - name: "RetryingModel.request"
         type: "method"

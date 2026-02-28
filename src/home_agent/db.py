@@ -30,6 +30,9 @@ async def init_db(db_path: str | Path) -> None:
             """
         )
         await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)"
+        )
+        await db.execute(
             """
             CREATE TABLE IF NOT EXISTS user_profiles (
                 user_id INTEGER PRIMARY KEY,

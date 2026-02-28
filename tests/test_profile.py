@@ -2,33 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from home_agent.db import init_db
 from home_agent.profile import MediaPreferences, ProfileManager, UserProfile, resolve_language
-
-
-@pytest.fixture
-async def test_db(tmp_path: Path) -> Path:
-    """Create a temporary SQLite database for profile tests.
-
-    Args:
-        tmp_path: Pytest temporary directory.
-
-    Returns:
-        Path to the initialised test database.
-    """
-    db_path = tmp_path / "test_profile.db"
-    await init_db(db_path)
-    return db_path
 
 
 def _make_profile(user_id: int = 1) -> UserProfile:
     """Create a minimal UserProfile for testing."""
-    now = datetime.now()
+    now = datetime.now(tz=timezone.utc)
     return UserProfile(
         user_id=user_id,
         created_at=now,
@@ -64,8 +48,8 @@ def test_profile_serializes_deserializes_identically() -> None:
     original_profile = UserProfile(
         user_id=42,
         name="Alice",
-        created_at=datetime(2024, 1, 1, 12, 0, 0),
-        updated_at=datetime(2024, 6, 1, 8, 0, 0),
+        created_at=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        updated_at=datetime(2024, 6, 1, 8, 0, 0, tzinfo=timezone.utc),
         reply_language="dutch",
         confirmation_mode="never",
         media_preferences=MediaPreferences(
@@ -165,7 +149,7 @@ async def test_profile_manager_saves_notes(test_db: Path) -> None:
 @pytest.mark.asyncio
 async def test_profile_manager_custom_default_profile(test_db: Path) -> None:
     """ProfileManager uses a supplied default_profile template for new users."""
-    now = datetime.now()
+    now = datetime.now(tz=timezone.utc)
     custom_default = UserProfile(
         user_id=0,
         created_at=now,
@@ -210,8 +194,8 @@ def test_profile_new_fields_roundtrip() -> None:
     """New profile fields (reply_language, confirmation_mode) survive JSON round-trip."""
     profile = UserProfile(
         user_id=42,
-        created_at=datetime(2024, 1, 1),
-        updated_at=datetime(2024, 1, 1),
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         reply_language="dutch",
         confirmation_mode="never",
         media_preferences=MediaPreferences(movie_quality="4k", series_quality="1080p"),
@@ -262,6 +246,26 @@ async def test_profile_manager_uses_language_code_for_new_user(
     manager = ProfileManager(test_db)
     profile = await manager.get(777, language_code="nl")
     assert profile.reply_language == "Dutch"
+
+
+def test_default_profile_has_timezone_aware_datetimes() -> None:
+    """Default profile created by _create_default_profile() has timezone-aware datetimes."""
+    manager = ProfileManager(":memory:")
+    profile = manager._create_default_profile()
+    assert profile.created_at.tzinfo is not None
+    assert profile.updated_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_profile_roundtrip_preserves_timezone(test_db: Path) -> None:
+    """Saving and reloading a profile preserves timezone-aware datetimes."""
+    manager = ProfileManager(test_db)
+    profile = await manager.get(9001)
+    assert profile.created_at.tzinfo is not None
+
+    await manager.save(profile)
+    reloaded = await manager.get(9001)
+    assert reloaded.created_at.tzinfo is not None
 
 
 @pytest.mark.asyncio

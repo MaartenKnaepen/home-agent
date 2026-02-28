@@ -36,6 +36,7 @@ class RetryingModel(Model):
         _model_name_or_instance: The model name string or Model instance passed at init.
         max_retries: Maximum number of retry attempts after the initial failure.
         base_delay: Base delay in seconds for the first retry. Doubles each attempt.
+        max_delay: Maximum delay in seconds for exponential backoff (caps the doubling).
         on_retry: Optional async callback invoked before each retry with
             ``(attempt, wait_seconds)``.
     """
@@ -46,6 +47,7 @@ class RetryingModel(Model):
         *,
         max_retries: int = 3,
         base_delay: float = 1.0,
+        max_delay: float = 30.0,
         on_retry: OnRetryCallback | None = None,
     ) -> None:
         """Initialise the retrying model wrapper.
@@ -59,6 +61,8 @@ class RetryingModel(Model):
                 Defaults to 3 (i.e. up to 4 total attempts).
             base_delay: Delay in seconds before the first retry. Doubles each retry.
                 Defaults to 1.0.
+            max_delay: Maximum delay in seconds for exponential backoff. Caps the
+                doubling so delays never exceed this value. Defaults to 30.0.
             on_retry: Optional async callback called before each sleep with
                 ``(attempt: int, wait_seconds: float)``.  Useful for logging or
                 telemetry in tests.
@@ -67,6 +71,7 @@ class RetryingModel(Model):
         self._inner_model: Model | None = inner if isinstance(inner, Model) else None
         self.max_retries = max_retries
         self.base_delay = base_delay
+        self.max_delay = max_delay
         self.on_retry = on_retry
 
     @property
@@ -143,7 +148,7 @@ class RetryingModel(Model):
                 if self.on_retry is not None:
                     await self.on_retry(attempt, delay)
                 await asyncio.sleep(delay)
-                delay *= 2
+                delay = min(delay * 2, self.max_delay)
 
         # Unreachable — the loop always returns or raises, but satisfies type checkers.
         raise RuntimeError("Retry loop exited unexpectedly")  # pragma: no cover

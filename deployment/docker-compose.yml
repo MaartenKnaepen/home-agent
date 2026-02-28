@@ -11,6 +11,7 @@ services:
     environment:
       # When running in Docker Compose, MCP server is reachable via service name
       - MCP_HOST=jellyseerr-mcp
+      # - LLM_RETRY_MAX_DELAY=30.0
     volumes:
       - home-agent-data:/app/data
     restart: unless-stopped

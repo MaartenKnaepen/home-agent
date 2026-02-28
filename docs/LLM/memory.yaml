@@ -8,11 +8,11 @@ last_updated: "2026-02-27"
 
 current_state:
   phase: 2
-  step: "2.7b"
-  name: "Rate Limit Retry Wrapper"
+  step: "2.review"
+  name: "Phase 1 & 2 Review Fixes"
   status: "complete"
-  next_step: "3.1 — Rich Telegram Formatting (or Docker redeploy to pick up Phase 2 changes)"
-  description: "RetryingModel wrapper added in src/home_agent/models/retry_model.py. Transparently retries LLM requests on HTTP 429 with exponential backoff (configurable via LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY). Lazy model resolution from string via infer_model(). bot.py catches final 429 after retries exhausted and sends user-friendly busy message. 104 tests pass, ty clean, 7/7 import-linter contracts green."
+  next_step: "3.1 — Rich Telegram Formatting"
+  description: "Applied all 10 fixes from the Phase 1 & 2 code review (docs/LLM/reviews/phase-1-2-review.md). 118 tests pass, ty clean, 8/8 import-linter contracts green, zero RuntimeWarnings."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -60,9 +60,30 @@ current_state:
     - "Disambiguation: numbered list with title, year, type, one distinguishing detail — never exposes TMDB IDs or technical identifiers"
     - "Single clear match skips disambiguation, franchise/sequel handling, user mind-change restarts from search"
     - "Dynamic system prompt refactored to ## Current User Context block with name, reply_language, confirmation_mode, quality preferences, notes"
+    - "All datetimes in profile.py are timezone-aware (datetime.now(tz=timezone.utc))"
+    - "Telegram message splitting: _split_message() in bot.py prevents 4096-char limit failures"
+    - "convert_history_to_messages() in history.py — reusable, tested conversion of DB records to PydanticAI ModelMessage objects"
+    - "RetryingModel.max_delay cap (default 30.0s) prevents unbounded exponential backoff; configurable via LLM_RETRY_MAX_DELAY env var"
+    - "AppConfig.llm_retry_max_delay: float = 30.0 — new config field for backoff cap"
+    - "All profile tools (set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode) use consistent model_copy() + ctx.deps.user_profile reassign pattern"
+    - "update_user_note tool uses model_copy() — no in-place Pydantic mutation anywhere in the codebase"
+    - "DB index on conversations.user_id for efficient history lookups"
+    - "Import-linter: 8 contracts (was 7). New: 'profile does not import history'. Gaps fixed: home_agent.models added to contracts 1-3, home_agent.profile added to contract 2"
+    - "pyproject.toml filterwarnings suppresses Python 3.10 GC-timing RuntimeWarnings from AsyncMock; resolves naturally on Python 3.12+"
   known_issues: []
 
 completed_steps:
+  - step: "2.review"
+    name: "Phase 1 & 2 Review Fixes"
+    date: "2026-02-27"
+    summary: "Applied all 10 code quality fixes identified in docs/LLM/reviews/phase-1-2-review.md. Key improvements: timezone-aware datetimes throughout profile.py, Telegram message splitting for 4096-char limit, removed dead run_bot() function, DB index on conversations.user_id, standardized model_copy()+reassign pattern across all profile tools and update_user_note, extracted convert_history_to_messages() to history.py, added llm_retry_max_delay backoff cap config field, closed 3 import-linter gaps + added profile/history peer contract (8 total), removed duplicate test_db fixtures, fixed RuntimeWarning in test_main.py."
+    decisions:
+      - "MagicMock (not AsyncMock) used to patch _async_main in test_main.py — prevents unawaited coroutine GC warning"
+      - "filterwarnings = ['ignore::RuntimeWarning'] added to pyproject.toml for residual Python 3.10 GC artifact warnings from AsyncMock"
+      - "llm_retry_max_delay exposed as env var (LLM_RETRY_MAX_DELAY) and documented in docker-compose.yml"
+      - "home_agent.profile not added to contract 2 (db) forbidden list — already present from prior implementation"
+    issues: []
+
   - step: "1.1"
     name: "Project Scaffolding"
     date: "2026-02-13"

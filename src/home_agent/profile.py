@@ -5,7 +5,7 @@ to handle database interactions via db.py.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -113,7 +113,7 @@ class ProfileManager:
         Returns:
             A new UserProfile with default settings.
         """
-        now = datetime.now()
+        now = datetime.now(tz=timezone.utc)
         return UserProfile(
             user_id=0,
             name=None,
@@ -153,15 +153,15 @@ class ProfileManager:
 
             # Ensure datetime fields are present
             if "created_at" not in profile_dict:
-                profile_dict["created_at"] = datetime.now()
+                profile_dict["created_at"] = datetime.now(tz=timezone.utc)
             if "updated_at" not in profile_dict:
-                profile_dict["updated_at"] = datetime.now()
+                profile_dict["updated_at"] = datetime.now(tz=timezone.utc)
 
             return UserProfile(**profile_dict)
 
         # Create default profile for new user using the stored template
         logger.info("Creating default profile for user %s", user_id)
-        now = datetime.now()
+        now = datetime.now(tz=timezone.utc)
         reply_language = resolve_language(language_code)
         new_profile = self.default_profile.model_copy(
             update={
@@ -180,7 +180,7 @@ class ProfileManager:
         Args:
             profile: User profile to save to database.
         """
-        profile = profile.model_copy(update={"updated_at": datetime.now()})
+        profile = profile.model_copy(update={"updated_at": datetime.now(tz=timezone.utc)})
         # Use mode="json" so datetime objects are serialised to ISO strings
         profile_data = profile.model_dump(mode="json")
         # Remove user_id — it's stored as the DB key, not in the data blob

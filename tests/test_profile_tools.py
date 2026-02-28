@@ -104,6 +104,22 @@ async def test_set_movie_quality_1080p(
     assert "1080p" in result
 
 
+@pytest.mark.asyncio
+async def test_set_movie_quality_updates_deps(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """set_movie_quality updates ctx.deps.user_profile with the new quality."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=50)
+    await profile_manager.save(profile)
+
+    ctx = make_mock_ctx(profile, profile_manager, mock_config, history_manager)
+    await set_movie_quality(ctx, "4k")
+
+    assert ctx.deps.user_profile.media_preferences.movie_quality == "4k"
+
+
 # ---------------------------------------------------------------------------
 # set_series_quality
 # ---------------------------------------------------------------------------
@@ -126,6 +142,22 @@ async def test_set_series_quality_updates_profile(
     assert "1080p" in result
     saved = await profile_manager.get(44)
     assert saved.media_preferences.series_quality == "1080p"
+
+
+@pytest.mark.asyncio
+async def test_set_series_quality_updates_deps(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """set_series_quality updates ctx.deps.user_profile with the new quality."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=51)
+    await profile_manager.save(profile)
+
+    ctx = make_mock_ctx(profile, profile_manager, mock_config, history_manager)
+    await set_series_quality(ctx, "1080p")
+
+    assert ctx.deps.user_profile.media_preferences.series_quality == "1080p"
 
 
 # ---------------------------------------------------------------------------

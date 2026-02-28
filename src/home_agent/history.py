@@ -10,7 +10,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from home_agent.db import get_history, save_message
 
@@ -59,6 +59,32 @@ class HistoryManager:
             List of messages, oldest first, each with 'role' and 'content' keys.
         """
         return await get_history(self.db_path, user_id=user_id, limit=limit)
+
+
+def convert_history_to_messages(
+    history: list[dict[str, str]],
+) -> list[ModelMessage]:
+    """Convert raw database history records to PydanticAI ModelMessage objects.
+
+    Skips entries with unknown roles (neither 'user' nor 'assistant').
+
+    Args:
+        history: List of dicts with 'role' and 'content' keys, oldest first.
+
+    Returns:
+        List of ModelMessage objects compatible with PydanticAI agent.run().
+    """
+    messages: list[ModelMessage] = []
+    for entry in history:
+        role = entry.get("role", "")
+        content = entry.get("content", "")
+        if role == "user":
+            messages.append(ModelRequest(parts=[UserPromptPart(content=content)]))
+        elif role == "assistant":
+            messages.append(ModelResponse(parts=[TextPart(content=content)]))
+        else:
+            logger.debug("Skipping unknown role in history: %s", role)
+    return messages
 
 
 def sliding_window_processor(

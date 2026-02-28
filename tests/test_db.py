@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from home_agent.db import get_history, get_profile, save_message, save_profile
+import aiosqlite
+
+from home_agent.db import get_history, get_profile, init_db, save_message, save_profile
 
 
 @pytest.mark.asyncio
@@ -36,6 +38,18 @@ async def test_history_limit(test_db: Path) -> None:
         {"role": "assistant", "content": "two"},
         {"role": "assistant", "content": "three"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_db_has_user_id_index(test_db: Path) -> None:
+    """init_db creates the idx_conversations_user_id index."""
+    async with aiosqlite.connect(test_db) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_conversations_user_id'"
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    assert row is not None
 
 
 @pytest.mark.asyncio

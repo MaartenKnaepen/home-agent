@@ -8,26 +8,7 @@ import pytest
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart, TextPart, ToolCallPart, ToolReturnPart
 
-from home_agent.db import init_db
-from home_agent.history import HistoryManager, sliding_window_processor
-
-
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-
-@pytest.fixture
-async def test_db(tmp_path: Path) -> Path:
-    """Create a temporary SQLite database for history tests.
-
-    Args:
-        tmp_path: Pytest temporary directory.
-
-    Returns:
-        Path to the initialised test database.
-    """
-    db_path = tmp_path / "test_history.db"
-    await init_db(db_path)
-    return db_path
+from home_agent.history import HistoryManager, convert_history_to_messages, sliding_window_processor
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -270,6 +251,34 @@ def test_sliding_window_tool_call_pairs_not_split() -> None:
     for i in range(0, len(result), 2):
         assert isinstance(result[i], ModelRequest), f"Expected ModelRequest at index {i}"
         assert isinstance(result[i + 1], ModelResponse), f"Expected ModelResponse at index {i + 1}"
+
+
+# ── convert_history_to_messages tests ────────────────────────────────────────
+
+
+def test_convert_history_empty() -> None:
+    """Empty input returns empty list."""
+    assert convert_history_to_messages([]) == []
+
+
+def test_convert_history_user_role() -> None:
+    """User role produces ModelRequest."""
+    result = convert_history_to_messages([{"role": "user", "content": "hello"}])
+    assert len(result) == 1
+    assert isinstance(result[0], ModelRequest)
+
+
+def test_convert_history_assistant_role() -> None:
+    """Assistant role produces ModelResponse."""
+    result = convert_history_to_messages([{"role": "assistant", "content": "hi"}])
+    assert len(result) == 1
+    assert isinstance(result[0], ModelResponse)
+
+
+def test_convert_history_unknown_role_skipped() -> None:
+    """Unknown role is skipped."""
+    result = convert_history_to_messages([{"role": "system", "content": "context"}])
+    assert result == []
 
 
 def test_sliding_window_trailing_unpaired_request_preserved() -> None:

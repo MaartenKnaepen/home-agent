@@ -137,6 +137,24 @@ async def test_update_user_note_tool_persists_note(
     assert len(saved_profile.notes) > 0
 
 
+async def test_update_user_note_updates_deps(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """update_user_note tool updates ctx.deps.user_profile.notes."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    deps = make_agent_deps(mock_config, profile_manager, history_manager, user_id=55)
+    await profile_manager.save(deps.user_profile)
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["update_user_note"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("I love sci-fi movies", deps=deps)
+
+    assert len(deps.user_profile.notes) > 0
+
+
 async def test_agent_returns_output(
     mock_config: AppConfig, test_db: Path
 ) -> None:

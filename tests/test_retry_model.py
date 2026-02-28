@@ -145,6 +145,30 @@ async def test_non_429_http_error_not_retried() -> None:
     mock_sleep.assert_not_called()
 
 
+async def test_delay_capped_at_max_delay() -> None:
+    """Delays are capped at max_delay: base, then max_delay for subsequent retries."""
+    from pydantic_ai.models import Model
+
+    inner = MagicMock(spec=Model)
+    inner.model_name = "test-model"
+    inner.system = "test"
+    inner.request = AsyncMock(side_effect=make_429_error())
+
+    model = RetryingModel(inner, max_retries=4, base_delay=10.0, max_delay=15.0)
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    with patch("home_agent.models.retry_model.asyncio.sleep", side_effect=fake_sleep):
+        with pytest.raises(ModelHTTPError) as exc_info:
+            await model.request([], None, MagicMock())
+
+    assert exc_info.value.status_code == 429
+    assert sleep_calls == [10.0, 15.0, 15.0, 15.0]
+
+
 async def test_on_retry_callback_invoked() -> None:
     """The on_retry callback is called with attempt index and wait_seconds."""
     from pydantic_ai.models import Model

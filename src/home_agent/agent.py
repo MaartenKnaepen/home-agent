@@ -47,6 +47,7 @@ def create_agent(
     model: str = "openrouter:qwen/qwq-32b:free",
     max_retries: int = 3,
     base_delay: float = 1.0,
+    max_delay: float = 30.0,
 ) -> Agent[AgentDeps, str]:
     """Create a PydanticAI agent with optional MCP toolsets.
 
@@ -59,6 +60,8 @@ def create_agent(
             Defaults to 3.
         base_delay: Base delay in seconds for exponential backoff. Doubles each retry.
             Defaults to 1.0.
+        max_delay: Maximum delay in seconds for exponential backoff. Caps the doubling.
+            Defaults to 30.0.
 
     Returns:
         Configured Agent instance with system prompt and tools registered.
@@ -67,7 +70,7 @@ def create_agent(
 
     # Pass the model string directly so the provider (and its API-key check) is
     # resolved lazily on the first request, honouring defer_model_check behaviour.
-    retrying_model = RetryingModel(model, max_retries=max_retries, base_delay=base_delay)
+    retrying_model = RetryingModel(model, max_retries=max_retries, base_delay=base_delay, max_delay=max_delay)
     agent_instance: Agent[AgentDeps, str] = Agent(
         retrying_model,
         deps_type=AgentDeps,
@@ -193,8 +196,9 @@ def create_agent(
             Confirmation message.
         """
         profile = ctx.deps.user_profile
-        profile.notes.append(note)
-        await ctx.deps.profile_manager.save(profile)
+        new_profile = profile.model_copy(update={"notes": [*profile.notes, note]})
+        ctx.deps.user_profile = new_profile
+        await ctx.deps.profile_manager.save(new_profile)
         logger.info("Added note to profile for user %s", profile.user_id)
         return f"Noted: {note}"
 

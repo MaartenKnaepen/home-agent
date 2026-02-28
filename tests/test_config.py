@@ -87,3 +87,9 @@ def test_retry_config_defaults(mock_env: None) -> None:
     config = AppConfig()
     assert config.llm_max_retries == 3
     assert config.llm_retry_base_delay == 1.0
+
+
+def test_retry_max_delay_default(mock_env):
+    """llm_retry_max_delay defaults to 30.0."""
+    config = AppConfig()
+    assert config.llm_retry_max_delay == 30.0
