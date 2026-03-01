@@ -36,9 +36,9 @@ def integration_config() -> AppConfig:
     return AppConfig(
         telegram_bot_token="test_token",
         openrouter_api_key="test_key",
-        jellyseerr_api_key="test_jelly_key",
+        seerr_api_key="test_seerr_key",
         allowed_telegram_ids=[12345],
-        jellyseerr_url="http://localhost:5055",
+        seerr_url="http://localhost:8085",
         db_path=Path("data/test.db"),
         log_level="DEBUG",
     )

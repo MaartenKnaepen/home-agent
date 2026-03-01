@@ -14,7 +14,7 @@ from home_agent.config import get_config
 from home_agent.db import init_db
 from home_agent.history import HistoryManager
 from home_agent.mcp.registry import MCPRegistry
-from home_agent.mcp.servers import get_jellyseerr_config
+from home_agent.mcp.servers import get_seerr_config
 from home_agent.profile import ProfileManager
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def _async_main() -> None:
     2. Set up logging
     3. Initialize SQLite database (creates tables if needed)
     4. Create ProfileManager and HistoryManager
-    5. Create MCPRegistry and register Jellyseerr server
+    5. Create MCPRegistry and register Seerr (Overseerr) server
     6. Create agent and enter its context (opens MCP connections once)
     7. Start Telegram bot polling (blocks until interrupted)
     8. On exit: agent context closes MCP connections cleanly
@@ -66,7 +66,7 @@ async def _async_main() -> None:
 
     # Register MCP servers
     registry = MCPRegistry()
-    registry.register(get_jellyseerr_config(mcp_port=config.mcp_port))
+    registry.register(get_seerr_config(mcp_port=config.mcp_port))
     logger.info("Registered MCP servers: %s", registry.get_tool_names())
 
     # Create agent with MCP toolsets

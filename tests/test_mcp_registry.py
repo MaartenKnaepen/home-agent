@@ -16,35 +16,35 @@ def test_register_adds_server() -> None:
     """register() adds server to registry."""
     registry = MCPRegistry()
     config = ServerConfig(
-        name="jellyseerr",
-        url="http://localhost:5056/mcp",
+        name="seerr",
+        url="http://localhost:8085/mcp",
         enabled=True,
     )
     registry.register(config)
     assert len(registry.servers) == 1
-    assert "jellyseerr" in registry.servers
+    assert "seerr" in registry.servers
 
 
 def test_get_toolsets_returns_toolsets() -> None:
     """get_toolsets() returns FastMCPToolset instances."""
     registry = MCPRegistry()
     config = ServerConfig(
-        name="jellyseerr",
-        url="http://localhost:5056/mcp",
+        name="seerr",
+        url="http://localhost:8085/mcp",
         enabled=True,
     )
     registry.register(config)
     with patch("home_agent.mcp.registry.FastMCPToolset") as mock_toolset:
         toolsets = registry.get_toolsets()
         assert len(toolsets) == 1
-        mock_toolset.assert_called_once_with("http://localhost:5056/mcp")
+        mock_toolset.assert_called_once_with("http://localhost:8085/mcp")
 
 
 def test_get_toolsets_excludes_disabled_servers() -> None:
     """get_toolsets() excludes disabled servers."""
     registry = MCPRegistry()
     registry.register(
-        ServerConfig(name="jellyseerr", url="http://localhost:5056/mcp", enabled=True)
+        ServerConfig(name="seerr", url="http://localhost:8085/mcp", enabled=True)
     )
     registry.register(
         ServerConfig(name="glances", url="http://localhost:5057/mcp", enabled=False)
@@ -58,10 +58,10 @@ def test_get_tool_names_returns_enabled_names() -> None:
     """get_tool_names() returns names of enabled servers."""
     registry = MCPRegistry()
     registry.register(
-        ServerConfig(name="jellyseerr", url="http://localhost:5056/mcp", enabled=True)
+        ServerConfig(name="seerr", url="http://localhost:8085/mcp", enabled=True)
     )
     registry.register(
         ServerConfig(name="glances", url="http://localhost:5057/mcp", enabled=False)
     )
     names = registry.get_tool_names()
-    assert names == ["jellyseerr"]
+    assert names == ["seerr"]

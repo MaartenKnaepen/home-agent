@@ -14,9 +14,9 @@ def mock_env():
     env = {
         "TELEGRAM_BOT_TOKEN": "token",
         "OPENROUTER_API_KEY": "openrouter",
-        "JELLYSEERR_API_KEY": "jelly",
+        "SEERR_API_KEY": "seerr",
         "ALLOWED_TELEGRAM_IDS": "[123,456]",
-        "JELLYSEERR_URL": "http://localhost:5055",
+        "SEERR_URL": "http://localhost:8085",
         "DB_PATH": "data/test.db",
         "LOG_LEVEL": "INFO",
     }
@@ -29,9 +29,9 @@ def mock_config() -> AppConfig:
     return AppConfig(
         telegram_bot_token="token",
         openrouter_api_key="openrouter",
-        jellyseerr_api_key="jelly",
+        seerr_api_key="seerr",
         allowed_telegram_ids=[123, 456],
-        jellyseerr_url="http://localhost:5055",
+        seerr_url="http://localhost:8085",
         db_path="data/test.db",
         log_level="INFO",
     )

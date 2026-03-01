@@ -10,39 +10,32 @@ services:
       - ../.env
     environment:
       # When running in Docker Compose, MCP server is reachable via service name
-      - MCP_HOST=jellyseerr-mcp
+      - MCP_HOST=seerr-mcp
       # - LLM_RETRY_MAX_DELAY=30.0
     volumes:
       - home-agent-data:/app/data
     restart: unless-stopped
     depends_on:
-      jellyseerr-mcp:
+      seerr-mcp:
         condition: service_healthy
     networks:
       - home-agent-network
 
-  jellyseerr-mcp:
-    image: ghcr.io/aserper/jellyseerr-mcp:latest
-    container_name: jellyseerr-mcp
+  seerr-mcp:
+    build:
+      context: ../mcp_servers/seerr
+      dockerfile: Dockerfile
+    container_name: seerr-mcp
     env_file:
       - ../.env
     environment:
-      # The PORT var is what jellyseerr-mcp container reads for its HTTP port
-      - PORT=${MCP_PORT:-5056}
-      # MCP_HOST tells our patched main.py to bind to all interfaces
-      - MCP_HOST=0.0.0.0
-    volumes:
-      # Mount patched main.py that binds to 0.0.0.0 instead of 127.0.0.1
-      - ../mcp_servers/jellyseerr/main.py:/app/main.py:ro
+      - SEERR_URL=${SEERR_URL}
+      - SEERR_API_KEY=${SEERR_API_KEY}
+      - HTTP_MODE=true
+      - PORT=${MCP_PORT:-8085}
     ports:
-      - "${MCP_PORT:-5056}:${MCP_PORT:-5056}"
+      - "${MCP_PORT:-8085}:${MCP_PORT:-8085}"
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python3", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', int(__import__('os').environ.get('PORT','5056')))); s.close()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
     networks:
       - home-agent-network
     extra_hosts:

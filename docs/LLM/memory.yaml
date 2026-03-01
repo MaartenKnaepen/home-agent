@@ -4,15 +4,15 @@
 # Updated after each completed step by autodev.
 
 project: home-agent
-last_updated: "2026-02-27"
+last_updated: "2026-02-28"
 
 current_state:
-  phase: 2
-  step: "2.review"
-  name: "Phase 1 & 2 Review Fixes"
+  phase: 3
+  step: "3.1"
+  name: "Overseerr MCP Migration"
   status: "complete"
-  next_step: "3.1 — Rich Telegram Formatting"
-  description: "Applied all 10 fixes from the Phase 1 & 2 code review (docs/LLM/reviews/phase-1-2-review.md). 118 tests pass, ty clean, 8/8 import-linter contracts green, zero RuntimeWarnings."
+  next_step: "4.1 — Rich Telegram Formatting"
+  description: "Replaced old jellyseerr-mcp sidecar with ghcr.io/jhomen368/overseerr-mcp:latest. Streamable HTTP at /mcp on port 8085, env vars renamed to SEERR_URL/SEERR_API_KEY, quality profile IDs removed (replaced by is4k boolean), mcp_servers/jellyseerr/ workaround deleted. 114 tests pass, ty clean, 8/8 import-linter contracts green."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -27,20 +27,20 @@ current_state:
     - "bot.py wired to call agent and persist conversation history"
     - "Jellyseerr community MCP server deployed via Docker Compose (deployment/docker-compose.yml)"
     - "MCPRegistry with register(), get_toolsets(), get_tool_names() — creates FastMCPToolset instances for enabled servers"
-    - "ServerConfig dataclass and get_jellyseerr_config() factory in mcp/servers.py"
+    - "ServerConfig dataclass and get_seerr_config() factory in mcp/servers.py"
     - "Import-linter contract enforcing mcp layer does not import agent, bot, or main"
     - "main.py composition root: config → logging → DB init → managers → MCP registry → bot polling"
     - "get_agent_toolsets() helper in agent.py for MCP toolset retrieval"
     - "Import-linter Layer 4 contract: no other module imports main"
     - "Multi-stage Dockerfile: uv build stage + python slim runtime stage, non-root appuser"
-    - "deployment/docker-compose.yml orchestrates home-agent + jellyseerr-mcp with shared network and persistent volume"
+    - "deployment/docker-compose.yml orchestrates home-agent + seerr-mcp with shared network and persistent volume"
     - "MCP_HOST env var in servers.py for Docker service discovery (defaults to localhost)"
     - "mcp_port config field in AppConfig"
     - ".dockerignore excludes tests, docs, .venv, IDE files, data"
     - "async with agent: lifted to main.py startup — MCP connection stays open for bot lifetime"
     - "Error handler registered in bot.py (_error_handler) — all unhandled exceptions now logged"
     - "Empty agent output guard in bot.py — prevents silent failure when model returns empty string"
-    - "patched main.py volume-mounted into jellyseerr-mcp container — disables DNS rebinding protection and binds to 0.0.0.0"
+    - "Overseerr MCP server (ghcr.io/jhomen368/overseerr-mcp:latest) deployed via Docker Compose as seerr-mcp — works out of the box, no patched entrypoint needed"
     - "PYTHONPATH=/app/src in Dockerfile runtime stage — required because uv installs as editable"
     - "Compose run command: docker compose -f deployment/docker-compose.yml --env-file .env up -d"
     - "RetryingModel wrapper in src/home_agent/models/retry_model.py — retries LLM requests on HTTP 429 with exponential backoff"
@@ -51,7 +51,7 @@ current_state:
     - "Old profiles with removed fields (NotificationPrefs, stats, old MediaPreferences) migrate seamlessly on next load/save"
     - "Auto-detect reply language from Telegram locale on first profile creation (resolve_language in profile.py)"
     - "ProfileManager.get() accepts language_code kwarg — only used for new user creation, existing profiles unaffected"
-    - "AppConfig has jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id (int | None = None) with positive-int validation"
+    - "AppConfig has seerr_url and seerr_api_key (reads SEERR_URL/SEERR_API_KEY env vars)"
     - "Profile tools package: src/home_agent/tools/ with set_movie_quality, set_series_quality, set_reply_language, set_confirmation_mode"
     - "Profile tools registered on agent via agent_instance.tool(fn) in create_agent()"
     - "Tools use RunContext[Any] to avoid circular import with agent.py (import-linter Layer 2 constraint)"
@@ -73,6 +73,17 @@ current_state:
   known_issues: []
 
 completed_steps:
+  - step: "3.1"
+    name: "Replace jellyseerr-mcp with overseerr-mcp"
+    date: "2026-02-28"
+    summary: "Replaced old ghcr.io/aserper/jellyseerr-mcp sidecar (SSE /sse, port 5056, patched entrypoint workaround) with ghcr.io/jhomen368/overseerr-mcp:latest (streamable HTTP /mcp, port 8085, works out of the box). Renamed config fields jellyseerr_url/jellyseerr_api_key → seerr_url/seerr_api_key. Removed jellyseerr_4k_profile_id/jellyseerr_1080p_profile_id and their validator — overseerr-mcp uses is4k: boolean instead of numeric profile IDs. Renamed get_jellyseerr_config → get_seerr_config. Added is4k parameter instructions to agent system prompt. Deleted mcp_servers/jellyseerr/ directory."
+    decisions:
+      - "SEERR_URL and SEERR_API_KEY passed directly as env vars to the container (from .env via env_file)"
+      - "Port hardcoded to 8085 in healthcheck (overseerr-mcp always uses this port)"
+      - "mcp_port default updated from 5056 to 8085 in AppConfig"
+      - "is4k boolean parameter replaces numeric profile ID routing — simpler and no admin config needed"
+    issues: []
+
   - step: "2.review"
     name: "Phase 1 & 2 Review Fixes"
     date: "2026-02-27"
@@ -342,11 +353,11 @@ architecture_decisions:
     status: final
 
 home_server_services:
-  - name: Jellyseerr
+  - name: Overseerr/Seerr
     purpose: "Media requests & discovery"
     mcp_status: community_docker
-    mcp_image: "ghcr.io/aserper/jellyseerr-mcp:latest"
-    mcp_endpoint: "http://jellyseerr-mcp:5056/sse"
+    mcp_image: "ghcr.io/jhomen368/overseerr-mcp:latest"
+    mcp_endpoint: "http://seerr-mcp:8085/mcp"
     phase: 1
   - name: Glances
     purpose: "System monitoring"
@@ -403,25 +414,20 @@ lessons_learned:
     takeaway: "Always set PYTHONPATH=/app/src in the runtime stage when using uv with src/ layout in Docker. Do not rely on --no-editable."
 
   - id: "LL-002"
-    title: "ghcr.io/aserper/jellyseerr-mcp always binds to 127.0.0.1 — needs patched main.py"
+    title: "ghcr.io/aserper/jellyseerr-mcp always binds to 127.0.0.1 — superseded by overseerr-mcp"
     date: "2026-02-25"
     context: "Connecting home-agent Docker container to jellyseerr-mcp Docker container over shared network"
-    problem: "The jellyseerr-mcp image always starts Uvicorn on 127.0.0.1 (loopback only). FASTMCP_HOST env var is set in the image but the mcp.server.fastmcp.Settings model ignores it at construction time. Host header validation (MCP's TransportSecuritySettings DNS rebinding protection) also rejects Docker service-name Host headers like 'Host: jellyseerr-mcp'."
-    resolution: |
-      Volume-mounted a patched main.py into the container at /app/main.py:
-      1. Sets host = os.environ.get('MCP_HOST', '0.0.0.0') before calling mcp.run()
-      2. Disables DNS rebinding protection: mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-      3. Runs uvicorn directly with host='0.0.0.0'
-      The patched file lives at mcp_servers/jellyseerr/main.py and is mounted via docker-compose volumes.
-    takeaway: "When using community MCP Docker images, always verify the bind address. Many images bind to 127.0.0.1 by default, making inter-container communication impossible. A volume-mounted patched entrypoint is cleaner than forking the image."
+    problem: "The old jellyseerr-mcp image always started Uvicorn on 127.0.0.1 (loopback only). Required a volume-mounted patched main.py workaround."
+    resolution: "Replaced with ghcr.io/jhomen368/overseerr-mcp:latest (step 3.1) which works out of the box — binds to 0.0.0.0 and uses streamable HTTP at /mcp on port 8085. No patched entrypoint needed."
+    takeaway: "When a community MCP Docker image requires patching, look for a better maintained alternative. overseerr-mcp works correctly without any volume-mount workarounds."
 
   - id: "LL-003"
-    title: "jellyseerr-mcp uses SSE transport (/sse), not streamable HTTP (/mcp)"
+    title: "overseerr-mcp uses streamable HTTP (/mcp), not SSE (/sse)"
     date: "2026-02-25"
-    context: "Connecting FastMCPToolset to jellyseerr-mcp"
-    problem: "FastMCPToolset defaults to streamable HTTP and connects to /mcp. The jellyseerr-mcp server only exposes /sse (GET for SSE stream) and /messages (POST). Connecting to /mcp returned 421 Misdirected Request or connection refused."
-    resolution: "Changed ServerConfig URL from http://jellyseerr-mcp:5056/mcp to http://jellyseerr-mcp:5056/sse. FastMCPToolset automatically detects SSE transport from the /sse path."
-    takeaway: "When connecting to MCP servers, always verify which transport they support. Older mcp.server.fastmcp servers use SSE (/sse + /messages). Newer fastmcp servers use streamable HTTP (/mcp). Check via curl first."
+    context: "Connecting FastMCPToolset to overseerr-mcp"
+    problem: "Old jellyseerr-mcp used SSE transport (/sse). New overseerr-mcp uses streamable HTTP (/mcp) on port 8085."
+    resolution: "ServerConfig URL set to http://seerr-mcp:8085/mcp. FastMCPToolset connects via streamable HTTP by default — this is the correct transport for overseerr-mcp."
+    takeaway: "Newer fastmcp-based MCP servers use streamable HTTP (/mcp). Always check the image docs for the correct endpoint and transport."
 
   - id: "LL-004"
     title: "Docker Compose .env auto-load only works from compose file directory"
@@ -434,9 +440,9 @@ lessons_learned:
   - id: "LL-005"
     title: "Docker healthcheck without curl — use Python socket check"
     date: "2026-02-25"
-    context: "Healthcheck for jellyseerr-mcp container which doesn't have curl installed"
-    problem: "Healthcheck used CMD curl -f http://localhost:5056/health which fails silently because (a) curl is not installed in the Python-based image and (b) /health endpoint doesn't exist."
-    resolution: "Switched healthcheck to: python3 -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', int(__import__('os').environ.get('PORT','5056')))); s.close()\""
+    context: "Healthcheck for seerr-mcp container which doesn't have curl installed"
+    problem: "Healthcheck used CMD curl -f http://localhost:8085/health which fails silently because (a) curl is not installed in the Python-based image and (b) /health endpoint doesn't exist."
+    resolution: "Switched healthcheck to: python3 -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8085)); s.close()\""
     takeaway: "For Python-based MCP server images, use a Python socket connect healthcheck instead of curl. Verify endpoints exist before using them in healthchecks."
 
   - id: "LL-006"

@@ -19,23 +19,18 @@ modules:
 
       - name: "AppConfig.mcp_port"
         type: "field"
-        signature: "int = 5056"
+        signature: "int = 8085"
         description: "Port number for the MCP server HTTP endpoint. Override via MCP_PORT env var."
 
-      - name: "AppConfig.jellyseerr_4k_profile_id"
+      - name: "AppConfig.seerr_url"
         type: "field"
-        signature: "int | None = None"
-        description: "Jellyseerr quality profile ID for 4K requests. None means use Jellyseerr's default profile. Must be a positive integer if set."
+        signature: "str = 'http://localhost:8096'"
+        description: "Overseerr/Seerr instance URL. Override via SEERR_URL env var."
 
-      - name: "AppConfig.jellyseerr_1080p_profile_id"
+      - name: "AppConfig.seerr_api_key"
         type: "field"
-        signature: "int | None = None"
-        description: "Jellyseerr quality profile ID for 1080p requests. None means use Jellyseerr's default profile. Must be a positive integer if set."
-
-      - name: "AppConfig.validate_profile_id"
-        type: "validator"
-        signature: "(cls, v: int | None) -> int | None"
-        description: "Pydantic field_validator for jellyseerr_4k_profile_id and jellyseerr_1080p_profile_id. Rejects zero and negative values."
+        signature: "SecretStr"
+        description: "Overseerr/Seerr API key. Set via SEERR_API_KEY env var."
 
       - name: "AppConfig.llm_max_retries"
         type: "field"
@@ -265,12 +260,12 @@ modules:
       - name: "home-agent"
         type: "service"
         signature: "build: context: .., dockerfile: Dockerfile"
-        description: "Home agent bot container. Loads .env, sets MCP_HOST=jellyseerr-mcp for Docker networking, mounts home-agent-data volume at /app/data, depends on healthy jellyseerr-mcp."
+        description: "Home agent bot container. Loads .env, sets MCP_HOST=seerr-mcp for Docker networking, mounts home-agent-data volume at /app/data, depends on healthy seerr-mcp."
 
-      - name: "jellyseerr-mcp"
+      - name: "seerr-mcp"
         type: "service"
-        signature: "image: ghcr.io/aserper/jellyseerr-mcp:latest"
-        description: "Community Jellyseerr MCP server with volume-mounted patched main.py (binds 0.0.0.0, disables DNS rebinding). SSE transport at /sse. Config via JELLYSEERR_URL, JELLYSEERR_API_KEY, MCP_PORT env vars. Health check via Python socket connect."
+        signature: "image: ghcr.io/jhomen368/overseerr-mcp:latest"
+        description: "Overseerr MCP server. Streamable HTTP transport at /mcp on port 8085. Config via SEERR_URL, SEERR_API_KEY env vars. Health check via Python socket connect. Works out of the box — no patched entrypoint needed."
 
   # ── src/home_agent/mcp/servers.py ───────────────────────────────────────
   - module: "src/home_agent/mcp/servers.py"
@@ -280,10 +275,10 @@ modules:
         signature: "name: str, url: str, enabled: bool = True"
         description: "Configuration for an MCP server with name, URL, and enabled state."
 
-      - name: "get_jellyseerr_config"
+      - name: "get_seerr_config"
         type: "function"
-        signature: "(mcp_port: int = 5056) -> ServerConfig"
-        description: "Create Jellyseerr MCP server configuration. Uses MCP_HOST env var (default 'localhost') for host and mcp_port for port. URL: http://{mcp_host}:{port}/sse."
+        signature: "(mcp_port: int = 8085) -> ServerConfig"
+        description: "Create Overseerr/Seerr MCP server configuration. Uses MCP_HOST env var (default 'localhost') for host and mcp_port for port. URL: http://{mcp_host}:{port}/mcp (streamable HTTP)."
 
   # ── src/home_agent/mcp/registry.py ──────────────────────────────────────
   - module: "src/home_agent/mcp/registry.py"
@@ -344,10 +339,3 @@ modules:
         signature: "async (messages: list[ModelMessage], model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters) -> AsyncIterator[StreamedResponse]"
         description: "Delegate streaming request to inner model without retry. Uses @asynccontextmanager."
 
-  # ── mcp_servers/jellyseerr/main.py ─────────────────────────────────────────
-  - module: "mcp_servers/jellyseerr/main.py"
-    exports:
-      - name: "patched entrypoint"
-        type: "script"
-        signature: "__main__ with --transport sse"
-        description: "Volume-mounted replacement for jellyseerr-mcp container's main.py. Binds uvicorn to 0.0.0.0 (not 127.0.0.1) and disables MCP DNS rebinding protection so Docker service-name Host headers are accepted."

@@ -516,14 +516,76 @@ phases:
       - test_config.py — Retry config fields have correct defaults
 
       '
-- focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.
+- focus: Replace jellyseerr-mcp sidecar with the overseerr-mcp container. The new
+    server uses streamable HTTP on /mcp. Quality routing is handled via the is4k boolean
+    in request_media — no numeric profile IDs needed.
   id: 3
+  name: Overseerr MCP Migration
+  steps:
+  - files:
+    - deployment/docker-compose.yml
+    - src/home_agent/config.py
+    - src/home_agent/mcp/servers.py
+    - src/home_agent/main.py
+    - src/home_agent/agent.py
+    - tests/test_mcp_servers.py
+    - tests/test_mcp_registry.py
+    - tests/test_docker.py
+    - tests/test_config.py
+    - docs/LLM/memory.yaml
+    - docs/LLM/api.yaml
+    goal: Swap out the old jellyseerr-mcp community container for ghcr.io/jhomen368/overseerr-mcp:latest,
+      update all config and code references, and remove the now-unnecessary numeric
+      quality profile ID fields.
+    id: '3.1'
+    name: Overseerr MCP Migration
+    notes: 'overseerr-mcp request_media tool has an is4k: boolean parameter — the agent
+      passes is4k=true for 4K requests and is4k=false for 1080p. Seerr routes to the
+      correct Radarr/Sonarr instance internally based on its own quality profile configuration.
+      No numeric profile IDs needed in AppConfig. The mcp_servers/jellyseerr/ patched
+      entrypoint was only needed because the old ghcr.io/aserper/jellyseerr-mcp image
+      bound to 127.0.0.1 — the new image works correctly out of the box. New container
+      uses streamable HTTP (/mcp), not SSE (/sse).'
+    scope: "- docker-compose.yml: replace jellyseerr-mcp service with seerr-mcp using\
+      \ ghcr.io/jhomen368/overseerr-mcp:latest, env vars SEERR_URL + SEERR_API_KEY,\
+      \ port 8085, healthcheck on /mcp. Update home-agent MCP_HOST=seerr-mcp. Remove\
+      \ mcp_servers/jellyseerr/main.py volume mount.\n- config.py: rename jellyseerr_url\
+      \ \u2192 seerr_url, jellyseerr_api_key \u2192 seerr_api_key. Remove jellyseerr_4k_profile_id\
+      \ and jellyseerr_1080p_profile_id (quality handled by is4k boolean in the MCP\
+      \ tool).\n- mcp/servers.py: rename get_jellyseerr_config() \u2192 get_seerr_config(),\
+      \ URL path /sse \u2192 /mcp (streamable HTTP), service name \u201Cjellyseerr\u201D\
+      \ \u2192 \u201Cseerr\u201D, port default 8085.\n- main.py: update import get_jellyseerr_config\
+      \ \u2192 get_seerr_config.\n- agent.py system prompt: update ## Tool Usage section\
+      \ \u2014 agent should pass is4k=true when user quality preference is \u201C4k\u201D\
+      , is4k=false for \u201C1080p\u201D. If a 4K request fails or is unavailable,\
+      \ offer to retry with is4k=false.\n- Delete mcp_servers/jellyseerr/ directory\
+      \ entirely (was a workaround for the broken old image).\n- Update all tests to\
+      \ reflect renamed fields, functions, service names, and endpoint.\n- Update memory.yaml\
+      \ and api.yaml.\n"
+    status: done
+    test: '- test_mcp_servers.py — get_seerr_config() returns ServerConfig with url
+      ending in /mcp, name "seerr", port 8085
+
+      - test_mcp_registry.py — registry with seerr config returns toolset; "seerr"
+      in tool names
+
+      - test_docker.py — compose has seerr-mcp service, no jellyseerr-mcp service;
+      home-agent depends_on seerr-mcp; no jellyseerr volume mount
+
+      - test_config.py — AppConfig loads seerr_url and seerr_api_key; jellyseerr_4k_profile_id
+      and jellyseerr_1080p_profile_id fields no longer exist
+
+      - verify.sh passes: ty + lint-imports + pytest all green
+
+      '
+- focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.
+  id: 4
   name: Polish & Advanced Features
   steps:
   - files:
     - src/home_agent/tools/telegram_tools.py
     goal: Responses use inline keyboards, images, and formatted text.
-    id: '3.1'
+    id: '4.1'
     name: Rich Telegram Formatting
     notes: ''
     scope: '- Agent tool to send inline keyboard buttons (e.g., confirm/deny)
@@ -545,7 +607,7 @@ phases:
   - files:
     - src/home_agent/notifications.py
     goal: Bot notifies user when downloads complete or issues arise.
-    id: '3.2'
+    id: '4.2'
     name: Proactive Notifications
     notes: ''
     scope: '- Periodic poller (or Jellyseerr webhook receiver) that checks for completed
@@ -568,7 +630,7 @@ phases:
     - src/home_agent/profile.py
     - src/home_agent/bot.py
     goal: Multiple users with separate profiles and permission levels.
-    id: '3.3'
+    id: '4.3'
     name: Multi-User Support
     notes: ''
     scope: '- Per-user profile isolation
@@ -589,7 +651,7 @@ phases:
   - files:
     - src/home_agent/bot.py
     goal: User sends voice message, agent processes it as text.
-    id: '3.4'
+    id: '4.4'
     name: Voice Message Support
     notes: ''
     scope: '- Voice message handler that downloads audio
@@ -609,7 +671,7 @@ phases:
       '
   - files: []
     goal: File conversion capabilities via natural language.
-    id: '3.5'
+    id: '4.5'
     name: IT Tools / BentoPDF / Vert Integration
     notes: ''
     scope: '- Find existing MCP servers
@@ -628,13 +690,13 @@ phases:
 
       '
 - focus: Add system monitoring via Glances MCP server.
-  id: 4
+  id: 5
   name: Glances Integration
   steps:
   - files:
     - mcp_servers/glances/server.py
     goal: MCP server exposing Glances system metrics.
-    id: '4.1'
+    id: '5.1'
     name: Find or Build Glances MCP Server
     notes: ''
     scope: "- Search GitHub / MCP registries for existing Glances MCP server\n- Evaluate\
@@ -653,7 +715,7 @@ phases:
   - files:
     - src/home_agent/mcp/servers.py
     goal: Glances MCP server loads alongside Jellyseerr on agent startup.
-    id: '4.2'
+    id: '5.2'
     name: Register Glances in MCP Registry
     notes: ''
     scope: '- Add Glances server config
@@ -672,7 +734,7 @@ phases:
   - files:
     - src/home_agent/agent.py
     goal: Agent knows how to use system monitoring and formats stats readably.
-    id: '4.3'
+    id: '5.3'
     name: System Prompt Update
     notes: ''
     scope: "- System prompt extended with monitoring capabilities and formatting guidance\n\
@@ -683,12 +745,12 @@ phases:
       \ disk usage when disk > 80%\n"
 - focus: 'Add MCP servers one at a time. Each follows the same pattern: find existing
     → evaluate → connect → test.'
-  id: 5
+  id: 6
   name: Expand Services
   steps:
   - files: []
     goal: Photo management via natural language.
-    id: '5.1'
+    id: '6.1'
     name: Immich MCP Server
     notes: ''
     scope: '- Find existing MCP server
@@ -708,7 +770,7 @@ phases:
       '
   - files: []
     goal: Recipe and meal plan management via natural language.
-    id: '5.2'
+    id: '6.2'
     name: Mealie MCP Server
     notes: ''
     scope: "- Find existing MCP server\n- Tools needed: search_recipes(query), get_meal_plan(date),\n\
@@ -723,7 +785,7 @@ phases:
       '
   - files: []
     goal: Baby tracking via natural language.
-    id: '5.3'
+    id: '6.3'
     name: BabyBuddy MCP Server
     notes: ''
     scope: "- Find existing MCP server\n- Tools needed: log_feeding(type, amount,\
@@ -739,7 +801,7 @@ phases:
       '
   - files: []
     goal: Document search and management via natural language.
-    id: '5.4'
+    id: '6.4'
     name: Paperless-ngx MCP Server
     notes: ''
     scope: "- Find existing MCP server\n- Tools needed: search_documents(query), get_document(id),\n\
@@ -753,7 +815,7 @@ phases:
       '
   - files: []
     goal: Task management via natural language.
-    id: '5.5'
+    id: '6.5'
     name: Vikunja MCP Server
     notes: ''
     scope: "- Find existing MCP server\n- Tools needed: get_tasks(list, filter), create_task(title,\
@@ -768,7 +830,7 @@ phases:
       '
   - files: []
     goal: Service uptime monitoring via natural language.
-    id: '5.6'
+    id: '6.6'
     name: Uptime Kuma MCP Server
     notes: ''
     scope: '- Find existing MCP server
@@ -789,7 +851,7 @@ phases:
       '
   - files: []
     goal: Docker container management via natural language.
-    id: '5.7'
+    id: '6.7'
     name: Portainer MCP Server
     notes: ''
     scope: "- Find existing MCP server\n- Tools needed: list_containers(), get_container(name),\n\
@@ -805,7 +867,7 @@ phases:
       '
   - files: []
     goal: Backup status monitoring via natural language.
-    id: '5.8'
+    id: '6.8'
     name: Duplicati MCP Server
     notes: ''
     scope: '- Find existing MCP server
@@ -825,7 +887,7 @@ phases:
   - files:
     - src/home_agent/mcp/registry.py
     goal: Only load relevant MCP servers per conversation to reduce token cost.
-    id: '5.9'
+    id: '6.9'
     name: Tool Filtering & Context-Aware Loading
     notes: ''
     scope: '- Classify incoming message to determine which MCP servers are relevant
