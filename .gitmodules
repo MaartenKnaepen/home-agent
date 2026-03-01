@@ -1,0 +1,3 @@
+[submodule "mcp_servers/seerr"]
+	path = mcp_servers/seerr
+	url = https://github.com/jhomen368/overseerr-mcp.git
