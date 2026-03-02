@@ -380,3 +380,53 @@ modules:
         signature: "(ctx: RunContext[AgentDeps], mediaId: int, mediaType: str) -> str"
         description: "Agent-callable tool to set the confirmed flag on GuardedToolset instances. Call after the user approves a media request. In Phase 4, this will be triggered by an inline keyboard button press instead of text 'yes'. Takes mediaId and mediaType for audit trail. Returns confirmation string. Logs at INFO level."
 
+  # ── Composition & Wiring ─────────────────────────────────────────────────────
+  - module: "src/home_agent/main.py"
+    exports:
+      - name: "async _async_main"
+        type: "function"
+        description: "Composition root. Orchestrates the entire lifecycle: creates config, initializes DB, creates MCPRegistry, registers Seerr, creates agent with GuardedToolsets, opens MCP context, creates Telegram application, passes guarded_toolsets to create_application()."
+        key_insight: "GuardedToolsets flow through the entire chain: MCPRegistry.get_toolsets() → create_agent() → passed to create_application(guarded_toolsets=toolsets) → bot.py uses them for deps injection before each agent.run() call."
+
+  - module: "src/home_agent/mcp/registry.py"
+    exports:
+      - name: "MCPRegistry.get_toolsets"
+        type: "method"
+        signature: "async () -> list[GuardedToolset]"
+        description: "Returns each FastMCPToolset wrapped in a GuardedToolset. This is where the middleware layer is applied. Logs at DEBUG when wrapping."
+
+  - module: "src/home_agent/bot.py"
+    exports:
+      - name: "make_message_handler"
+        type: "function"
+        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent, guarded_toolsets: list[GuardedToolset] | None = None) -> Callable"
+        description: "Creates the Telegram message handler. Before each agent.run(), sets guarded_toolset.deps = agent_deps on every toolset in the guarded_toolsets list. This provides runtime access to the user's profile and confirmation state. Logs at DEBUG when setting deps."
+
+      - name: "create_application"
+        type: "function"
+        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent, guarded_toolsets: list[GuardedToolset] | None = None) -> Application"
+        description: "Creates the Telegram Application and registers message handlers. Accepts optional guarded_toolsets parameter and passes them to make_message_handler()."
+
+  - module: "src/home_agent/agent.py"
+    exports:
+      - name: "create_agent"
+        type: "function"
+        signature: "(toolsets: list[Any] | None = None, model: str = ..., max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 60.0) -> Agent"
+        description: "Creates the PydanticAI agent with GuardedToolsets (or any toolsets). Registers confirm_request @agent.tool alongside other profile tools. Type hint is `list[Any]` to accept both FastMCPToolset and GuardedToolset transparently."
+
+      - name: "AgentDeps"
+        type: "dataclass"
+        fields:
+          - "config: AppConfig"
+          - "profile_manager: ProfileManager"
+          - "history_manager: HistoryManager"
+          - "user_profile: UserProfile"
+          - "guarded_toolsets: list[GuardedToolset] = field(default_factory=list)"
+        description: "Injected into the agent at runtime. Includes guarded_toolsets so tools like confirm_request can access and modify the confirmed flag."
+
+  - module: "src/home_agent/prompts.py"
+    exports:
+      - name: "SYSTEM_PROMPT"
+        type: "string constant"
+        description: "System prompt for the agent. Simplified to remove hard-enforcement language (MUST, NEVER, STOP) for gates now enforced in code. Kept happy-path guidance (search → disambiguate → quality → confirm → request) and tone guidance. Added confirm_request to available tools list and step 4 guidance."
+

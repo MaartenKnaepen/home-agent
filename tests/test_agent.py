@@ -493,3 +493,140 @@ async def test_static_prompt_handles_franchise_disambiguation(
     )
     # Franchise/sequel handling must be mentioned
     assert "sequels" in all_system_text or "franchise" in all_system_text
+
+
+# ---------------------------------------------------------------------------
+# GuardedToolset and confirm_request tests
+# ---------------------------------------------------------------------------
+
+
+def test_create_agent_with_guarded_toolsets() -> None:
+    """create_agent() accepts GuardedToolset instances and returns a valid agent."""
+    from unittest.mock import MagicMock
+
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    guarded_toolset = MagicMock(spec=GuardedToolset)
+    agent_instance = create_agent(toolsets=[guarded_toolset])
+
+    assert agent_instance is not None
+    assert agent_instance.deps_type is AgentDeps
+
+
+def test_create_agent_with_none_toolsets() -> None:
+    """create_agent() with toolsets=None creates a valid agent."""
+    agent_instance = create_agent(toolsets=None)
+    assert agent_instance is not None
+    assert agent_instance.deps_type is AgentDeps
+
+
+async def test_confirm_request_tool_is_registered(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """confirm_request tool is registered on the agent and visible to the model."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    deps = make_agent_deps(mock_config, profile_manager, history_manager)
+
+    agent_instance = create_agent()
+    m = TestModel()
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("hello", deps=deps)
+
+    assert m.last_model_request_parameters is not None
+    tool_names = [t.name for t in m.last_model_request_parameters.function_tools]
+    assert "confirm_request" in tool_names
+
+
+async def test_confirm_request_tool_sets_confirmed_flag(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """confirm_request tool sets the confirmed flag on all guarded toolsets."""
+    from unittest.mock import MagicMock
+
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+    from home_agent.profile import MediaPreferences
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+
+    guarded_toolset = MagicMock(spec=GuardedToolset)
+    guarded_toolset.set_confirmed = MagicMock()
+
+    profile = UserProfile(
+        user_id=200,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        media_preferences=MediaPreferences(movie_quality="4k"),
+        confirmation_mode="always",
+    )
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[guarded_toolset],
+    )
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["confirm_request"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("yes, confirm it", deps=deps)
+
+    # set_confirmed should have been called on the guarded toolset
+    guarded_toolset.set_confirmed.assert_called_once()
+
+
+async def test_all_profile_tools_registered(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """All expected profile tools are registered on the agent."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    deps = make_agent_deps(mock_config, profile_manager, history_manager)
+
+    agent_instance = create_agent()
+    m = TestModel()
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("hello", deps=deps)
+
+    assert m.last_model_request_parameters is not None
+    tool_names = [t.name for t in m.last_model_request_parameters.function_tools]
+    expected_tools = [
+        "update_user_note",
+        "set_movie_quality",
+        "set_series_quality",
+        "set_reply_language",
+        "set_confirmation_mode",
+        "confirm_request",
+    ]
+    for tool in expected_tools:
+        assert tool in tool_names, f"Expected tool '{tool}' not registered"
+
+
+async def test_static_prompt_mentions_confirm_request_tool(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """Static system prompt mentions the confirm_request tool."""
+    from pydantic_ai.messages import SystemPromptPart
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    deps = make_agent_deps(mock_config, profile_manager, history_manager)
+
+    agent_instance = create_agent()
+    m = TestModel()
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            result = await agent_instance.run("hello", deps=deps)
+
+    all_system_text = " ".join(
+        part.content
+        for msg in result.all_messages()
+        for part in msg.parts
+        if isinstance(part, SystemPromptPart)
+    )
+    assert "confirm_request" in all_system_text

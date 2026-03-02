@@ -294,6 +294,176 @@ async def test_confirmation_mode_never_in_deps(
     assert deps.user_profile.confirmation_mode == "never"
 
 
+async def test_bot_sets_deps_on_guarded_toolsets(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """make_message_handler sets deps on GuardedToolsets before agent.run().
+
+    Verifies that each GuardedToolset's deps attribute is set to the AgentDeps
+    built for the current request before agent.run() is called.
+    """
+    from unittest.mock import MagicMock
+
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    # Track what deps were set on the toolset
+    captured_deps: list[AgentDeps] = []
+
+    class CapturingGuardedToolset(GuardedToolset):
+        def __init__(self) -> None:
+            super().__init__(MagicMock())
+            self._deps_set: AgentDeps | None = None
+
+        @property  # type: ignore[override]
+        def deps(self) -> AgentDeps | None:
+            return self._deps_set
+
+        @deps.setter
+        def deps(self, value: AgentDeps) -> None:
+            self._deps_set = value
+            if value is not None:
+                captured_deps.append(value)
+
+    guarded_toolset = CapturingGuardedToolset()
+
+    mock_result = MagicMock()
+    mock_result.output = "Done!"
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(
+        integration_config,
+        profile_manager,
+        history_manager,
+        mock_agent,
+        guarded_toolsets=[guarded_toolset],
+    )
+    update = make_update("add Inception", user_id=12345)
+    await handler(update, MagicMock())
+
+    # deps should have been set on the guarded toolset before agent.run()
+    assert len(captured_deps) == 1
+    assert captured_deps[0].user_profile.user_id == 12345
+
+
+async def test_bot_passes_guarded_toolsets_in_agent_deps(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """make_message_handler includes guarded_toolsets in the AgentDeps passed to agent.run().
+
+    Verifies the confirm_request tool will have access to the GuardedToolsets
+    via ctx.deps.guarded_toolsets.
+    """
+    from unittest.mock import MagicMock
+
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    guarded_toolset = MagicMock(spec=GuardedToolset)
+    guarded_toolset.deps = None
+
+    mock_result = MagicMock()
+    mock_result.output = "OK!"
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(
+        integration_config,
+        profile_manager,
+        history_manager,
+        mock_agent,
+        guarded_toolsets=[guarded_toolset],
+    )
+    update = make_update("search for Troy", user_id=12345)
+    await handler(update, MagicMock())
+
+    call_args = mock_agent.run.call_args
+    deps = call_args[1]["deps"]
+    assert deps.guarded_toolsets == [guarded_toolset]
+
+
+async def test_bot_no_guarded_toolsets_still_works(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """make_message_handler works correctly when no guarded_toolsets provided."""
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    mock_result = MagicMock()
+    mock_result.output = "Hello!"
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    # No guarded_toolsets argument — should default to empty list
+    handler = make_message_handler(
+        integration_config,
+        profile_manager,
+        history_manager,
+        mock_agent,
+    )
+    update = make_update("hi", user_id=12345)
+    await handler(update, MagicMock())
+
+    call_args = mock_agent.run.call_args
+    deps = call_args[1]["deps"]
+    assert deps.guarded_toolsets == []
+
+
+async def test_confirm_request_tool_end_to_end(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """confirm_request tool called by real agent sets confirmed on GuardedToolset.
+
+    Uses PydanticAI's TestModel to force a confirm_request call and verifies
+    that set_confirmed is called on all guarded toolsets in deps.
+    """
+    from unittest.mock import MagicMock
+
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    profile = UserProfile(
+        user_id=12345,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        media_preferences=MediaPreferences(movie_quality="4k"),
+        confirmation_mode="always",
+    )
+    await profile_manager.save(profile)
+
+    guarded_toolset = MagicMock(spec=GuardedToolset)
+    guarded_toolset.set_confirmed = MagicMock()
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["confirm_request"])
+
+    deps = AgentDeps(
+        config=integration_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[guarded_toolset],
+    )
+
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("yes, confirm the request", deps=deps)
+
+    # set_confirmed should have been called on the guarded toolset
+    guarded_toolset.set_confirmed.assert_called_once()
+
+
 async def test_language_switch_persists_across_messages(
     integration_config: AppConfig,
     integration_db: Path,

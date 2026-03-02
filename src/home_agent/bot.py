@@ -22,6 +22,7 @@ from telegram.ext import (
 from home_agent.agent import AgentDeps
 from home_agent.config import AppConfig
 from home_agent.history import HistoryManager, convert_history_to_messages
+from home_agent.mcp.guarded_toolset import GuardedToolset
 from home_agent.profile import ProfileManager
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ def make_message_handler(
     profile_manager: ProfileManager,
     history_manager: HistoryManager,
     agent: Agent[AgentDeps, str],
+    guarded_toolsets: list[GuardedToolset] | None = None,
 ):
     """Create a Telegram message handler closure that captures app config and managers.
 
@@ -93,10 +95,14 @@ def make_message_handler(
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history persistence.
         agent: The PydanticAI agent instance to use for inference.
+        guarded_toolsets: Optional list of GuardedToolset instances. If provided,
+            deps will be injected into each toolset before every agent.run() call
+            so that guards can access the current user's profile.
 
     Returns:
         An async handler coroutine compatible with python-telegram-bot.
     """
+    _guarded_toolsets: list[GuardedToolset] = guarded_toolsets or []
 
     async def handle_message(
         update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -140,7 +146,13 @@ def make_message_handler(
             profile_manager=profile_manager,
             history_manager=history_manager,
             user_profile=user_profile,
+            guarded_toolsets=_guarded_toolsets,
         )
+
+        # Inject deps into each GuardedToolset so gates can access the user profile
+        for toolset in _guarded_toolsets:
+            toolset.deps = deps
+            logger.debug("Set deps on GuardedToolset", extra={"user_id": user_id})
 
         try:
             result = await agent.run(text, deps=deps, message_history=message_history)
@@ -184,6 +196,7 @@ def create_application(
     profile_manager: ProfileManager,
     history_manager: HistoryManager,
     agent: Agent[AgentDeps, str],
+    guarded_toolsets: list[GuardedToolset] | None = None,
 ) -> Application:
     """Build and return a configured Telegram Application.
 
@@ -194,13 +207,15 @@ def create_application(
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history persistence.
         agent: The PydanticAI agent instance to use for inference.
+        guarded_toolsets: Optional list of GuardedToolset instances whose deps
+            will be set before each agent.run() call.
 
     Returns:
         A fully configured :class:`telegram.ext.Application` instance.
     """
     token = config.telegram_bot_token.get_secret_value()
     app: Application = Application.builder().token(token).build()
-    handler = make_message_handler(config, profile_manager, history_manager, agent)
+    handler = make_message_handler(config, profile_manager, history_manager, agent, guarded_toolsets)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     app.add_error_handler(_error_handler)
     logger.info("Telegram application configured with whitelist: %s", config.allowed_telegram_ids)

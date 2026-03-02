@@ -8,11 +8,11 @@ last_updated: "2026-02-28"
 
 current_state:
   phase: 3
-  step: "3.2"
-  name: "GuardedToolset — MCP Tool Call Middleware"
+  step: "3.3"
+  name: "Wire GuardedToolset into Agent Pipeline"
   status: "complete"
-  next_step: "3.3 — Wire GuardedToolset into Agent Pipeline"
-  description: "Implemented GuardedToolset wrapper for MCP tool call middleware using Option B from tool_control.md. Guards enforce quality must be set before request_media. Confirmation gate blocks request_media when confirmation_mode='always'. confirm_request tool sets the confirmed flag. All non-gated tools pass through transparently (search_media, future PDF/file tools). 138 tests pass, ty clean, 8/8 import-linter contracts green."
+  next_step: "3.4 — Verify & Document Tool Guards"
+  description: "Implemented GuardedToolset wrapper for MCP tool call middleware using Option B from tool_control.md. Guards enforce quality must be set before request_media. Confirmation gate blocks request_media when confirmation_mode='always'. confirm_request tool sets the confirmed flag. All non-gated tools pass through transparently (search_media, future PDF/file tools). Wired GuardedToolsets into agent pipeline: MCPRegistry wraps toolsets, bot.py injects deps before agent.run(), main.py passes toolsets through the entire chain. System prompt simplified. 151 tests pass, ty clean, 8/8 import-linter contracts green."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -82,6 +82,11 @@ current_state:
   known_issues: []
 
 completed_steps:
+  - step: "3.3"
+    name: "Wire GuardedToolset into Agent Pipeline"
+    date: "2026-03-02"
+    summary: "Wired GuardedToolset throughout the agent pipeline. MCPRegistry.get_toolsets() now wraps each FastMCPToolset in a GuardedToolset before returning. bot.py sets guarded_toolset.deps = agent_deps before each agent.run() call for runtime access to user profile. main.py passes guarded_toolsets=toolsets to create_application() so the entire chain is connected. create_agent() registers confirm_request @agent.tool alongside existing profile tools. System prompt simplified: removed hard-enforcement language (MUST, NEVER, STOP), kept happy-path guidance and tone, added confirm_request tool to available tools list. All 151 tests pass (22 new tests for wiring, deps injection, confirm_request registration, end-to-end flows). ty clean, 8/8 import-linter contracts maintained."
+    decision: "GuardedToolsets are created in MCPRegistry and passed through the entire composition chain: registry → agent (for PydanticAI toolset lifecycle) → bot (for deps injection) → main (orchestration). Deps injection happens per-message in bot.py before agent.run(), ensuring each request gets current user profile and confirmed flag state."
   - step: "3.2"
     name: "GuardedToolset — MCP Tool Call Middleware"
     date: "2026-03-02"

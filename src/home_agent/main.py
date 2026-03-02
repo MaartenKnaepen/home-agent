@@ -84,7 +84,9 @@ async def _async_main() -> None:
     # Open MCP connections once for the lifetime of the bot
     async with agent:
         logger.info("MCP connections established, starting Telegram bot...")
-        app = create_application(config, profile_manager, history_manager, agent)
+        app = create_application(
+            config, profile_manager, history_manager, agent, guarded_toolsets=toolsets
+        )
         async with app:
             await app.start()
             assert app.updater is not None

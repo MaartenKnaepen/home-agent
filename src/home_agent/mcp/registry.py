@@ -3,16 +3,21 @@
 Manages MCP server connections and exposes toolsets to the agent.
 """
 
+import logging
+
 from pydantic_ai.toolsets.fastmcp import FastMCPToolset
 
+from home_agent.mcp.guarded_toolset import GuardedToolset
 from home_agent.mcp.servers import ServerConfig
+
+logger = logging.getLogger(__name__)
 
 
 class MCPRegistry:
     """Registry for MCP servers.
 
-    Manages server configurations and creates FastMCPToolset instances
-    for the PydanticAI agent.
+    Manages server configurations and creates GuardedToolset-wrapped
+    FastMCPToolset instances for the PydanticAI agent.
 
     Attributes:
         servers: Dict mapping server names to ServerConfig instances.
@@ -30,17 +35,25 @@ class MCPRegistry:
         """
         self.servers[config.name] = config
 
-    def get_toolsets(self) -> list[FastMCPToolset]:
-        """Create FastMCPToolset instances for all enabled servers.
+    def get_toolsets(self) -> list[GuardedToolset]:
+        """Create GuardedToolset-wrapped instances for all enabled servers.
+
+        Each FastMCPToolset is wrapped in a GuardedToolset that enforces
+        quality and confirmation gates before forwarding tool calls.
 
         Returns:
-            List of FastMCPToolset instances for enabled servers.
+            List of GuardedToolset instances for enabled servers.
         """
         toolsets = []
         for server in self.servers.values():
             if server.enabled:
-                toolset = FastMCPToolset(server.url)
-                toolsets.append(toolset)
+                inner_toolset = FastMCPToolset(server.url)
+                guarded = GuardedToolset(inner_toolset)
+                toolsets.append(guarded)
+                logger.debug(
+                    "Wrapped MCP toolset in GuardedToolset",
+                    extra={"server": server.name},
+                )
         return toolsets
 
     def get_tool_names(self) -> list[str]:
