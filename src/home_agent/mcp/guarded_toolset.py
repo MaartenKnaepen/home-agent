@@ -10,26 +10,30 @@ async-first.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    pass
+from pydantic_ai import RunContext
+from pydantic_ai.toolsets.abstract import AbstractToolset, ToolsetTool
 
 logger = logging.getLogger(__name__)
 
 
-class GuardedToolset:
+class GuardedToolset(AbstractToolset[Any]):
     """Wraps a FastMCPToolset and enforces gates on MCP tool calls.
 
-    Gates are checked in order before any tool call is forwarded to the inner
-    toolset.  Gate failures return plain English error strings — the LLM reads
-    these as tool results and must respond accordingly.
+    Properly subclasses AbstractToolset so PydanticAI treats it as a first-class
+    toolset. Delegates get_tools() and lifecycle (__aenter__/__aexit__) to the
+    inner toolset transparently. Intercepts call_tool() to apply quality and
+    confirmation gates before forwarding.
+
+    Gate failures return plain English error strings — the LLM reads these as
+    tool results and must respond accordingly.
 
     Attributes:
         inner_toolset: The underlying FastMCPToolset to forward calls to.
         deps: AgentDeps injected before each agent.run() call. None until set.
         confirmed: True when confirm_request has been called for this turn.
-        called_tools: Set of tool names called successfully in this turn.
+        called_tools: Set of tool names called in this turn.
     """
 
     def __init__(self, inner_toolset: Any) -> None:
@@ -43,7 +47,38 @@ class GuardedToolset:
         self.confirmed: bool = False
         self.called_tools: set[str] = set()
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+    @property
+    def id(self) -> str | None:
+        """Delegate id to inner toolset."""
+        return self.inner_toolset.id
+
+    async def __aenter__(self) -> GuardedToolset:
+        """Enter context — delegate to inner toolset to set up MCP connections."""
+        await self.inner_toolset.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool | None:
+        """Exit context — delegate to inner toolset to tear down MCP connections."""
+        return await self.inner_toolset.__aexit__(*args)
+
+    async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
+        """Delegate tool listing to the inner toolset.
+
+        Args:
+            ctx: The run context.
+
+        Returns:
+            Dict of tool name to ToolsetTool, unchanged from the inner toolset.
+        """
+        return await self.inner_toolset.get_tools(ctx)
+
+    async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: RunContext[Any],
+        tool: ToolsetTool[Any],
+    ) -> Any:
         """Intercept a tool call, apply guards, then forward to inner toolset.
 
         Gate order:
@@ -59,14 +94,16 @@ class GuardedToolset:
 
         Args:
             name: Name of the MCP tool being called.
-            arguments: Arguments dict passed to the tool.
+            tool_args: Arguments dict passed to the tool.
+            ctx: The run context (used to read deps if not set directly).
+            tool: The tool definition from get_tools().
 
         Returns:
-            Tool result string, or a plain English gate error string.
+            Tool result, or a plain English gate error string.
         """
         # Guard 1: request_media quality check
         if name == "request_media":
-            media_type = arguments.get("mediaType")
+            media_type = tool_args.get("mediaType")
             if media_type == "movie" and not self._has_movie_quality():
                 error_msg = (
                     "STOP: movie_quality not set. Ask the user: "
@@ -116,7 +153,7 @@ class GuardedToolset:
 
         # All other tools (and request_media once gates pass) go through
         logger.debug("Tool call allowed", extra={"tool": name})
-        result = await self.inner_toolset.call_tool(name, arguments)
+        result = await self.inner_toolset.call_tool(name, tool_args, ctx, tool)
 
         # Track successful calls and reset confirmation after request_media
         self.called_tools.add(name)

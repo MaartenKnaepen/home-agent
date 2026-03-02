@@ -22,6 +22,11 @@ from home_agent.history import HistoryManager
 from home_agent.profile import MediaPreferences, ProfileManager, UserProfile
 
 
+async def _call(guarded: object, name: str, args: dict) -> object:
+    """Helper to call GuardedToolset.call_tool with mock ctx and tool."""
+    return await guarded.call_tool(name, args, MagicMock(), MagicMock())  # type: ignore[union-attr]
+
+
 @pytest.fixture
 async def integration_db(tmp_path: Path) -> Path:
     """Temporary SQLite database for integration tests."""
@@ -516,9 +521,7 @@ async def test_e2e_new_user_quality_gate_blocks_request(
 
     # Simulate what the agent would do: call request_media directly on the guarded toolset
     # (Since we mocked the agent, we test the guard behaviour directly)
-    result = await guarded_toolset.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result = await _call(guarded_toolset, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert "movie_quality not set" in result.lower()
     assert "set_movie_quality" in result
     mock_inner.call_tool.assert_not_called()
@@ -573,17 +576,13 @@ async def test_e2e_confirmation_mode_always_flow(
     assert guarded_toolset.deps.user_profile.confirmation_mode == "always"
 
     # Without confirmation → guard blocks
-    result_blocked = await guarded_toolset.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result_blocked = await _call(guarded_toolset, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert "confirmation required" in result_blocked.lower()
     mock_inner.call_tool.assert_not_called()
 
     # After confirmation → guard passes
     guarded_toolset.set_confirmed(mediaId=123, mediaType="movie")
-    result_allowed = await guarded_toolset.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result_allowed = await _call(guarded_toolset, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert result_allowed == "Request accepted!"
     mock_inner.call_tool.assert_called_once()
 

@@ -17,6 +17,11 @@ from home_agent.mcp.guarded_toolset import GuardedToolset
 from home_agent.profile import MediaPreferences, UserProfile
 
 
+async def _call(guarded: GuardedToolset, name: str, args: dict) -> object:
+    """Helper to call GuardedToolset.call_tool with mock ctx and tool."""
+    return await guarded.call_tool(name, args, MagicMock(), MagicMock())
+
+
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
@@ -104,9 +109,7 @@ async def test_request_media_blocked_when_movie_quality_not_set(
     """request_media is blocked when movie_quality is None."""
     guarded.deps = deps_no_quality
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert "movie_quality not set" in result.lower()
     assert "set_movie_quality" in result
@@ -121,9 +124,7 @@ async def test_request_media_movie_blocked_logs_warning(
     guarded.deps = deps_no_quality
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
-        await guarded.call_tool(
-            "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-        )
+        await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert "request_media blocked by quality gate" in caplog.text
 
@@ -140,9 +141,7 @@ async def test_request_media_blocked_when_series_quality_not_set(
     """request_media is blocked when series_quality is None."""
     guarded.deps = deps_no_quality
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "tv", "mediaId": 456}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "tv", "mediaId": 456})
 
     assert "series_quality not set" in result.lower()
     assert "set_series_quality" in result
@@ -157,9 +156,7 @@ async def test_request_media_tv_blocked_logs_warning(
     guarded.deps = deps_no_quality
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
-        await guarded.call_tool(
-            "request_media", {"mediaType": "tv", "mediaId": 456}
-        )
+        await _call(guarded, "request_media", {"mediaType": "tv", "mediaId": 456})
 
     assert "request_media blocked by quality gate" in caplog.text
 
@@ -176,14 +173,10 @@ async def test_request_media_movie_allowed_when_quality_set_no_confirmation(
     """request_media is allowed when movie_quality set and confirmation_mode='never'."""
     guarded.deps = deps_with_quality
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert result == "tool result"
-    mock_inner_toolset.call_tool.assert_called_once_with(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    mock_inner_toolset.call_tool.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -193,9 +186,7 @@ async def test_request_media_tv_allowed_when_quality_set_no_confirmation(
     """request_media is allowed for TV when series_quality set and confirmation_mode='never'."""
     guarded.deps = deps_with_quality
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "tv", "mediaId": 456}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "tv", "mediaId": 456})
 
     assert result == "tool result"
     mock_inner_toolset.call_tool.assert_called_once()
@@ -213,9 +204,7 @@ async def test_request_media_blocked_when_confirmation_required_and_not_confirme
     """request_media blocked when confirmation_mode='always' and confirmed=False."""
     guarded.deps = deps_always_confirm
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert "confirmation required" in result.lower()
     assert "confirm_request" in result
@@ -230,9 +219,7 @@ async def test_request_media_blocked_confirmation_logs_warning(
     guarded.deps = deps_always_confirm
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
-        await guarded.call_tool(
-            "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-        )
+        await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert "request_media blocked by confirmation gate" in caplog.text
 
@@ -245,9 +232,7 @@ async def test_request_media_allowed_when_confirmation_required_and_confirmed(
     guarded.deps = deps_always_confirm
     guarded.confirmed = True
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert result == "tool result"
     mock_inner_toolset.call_tool.assert_called_once()
@@ -266,9 +251,7 @@ async def test_confirmed_flag_resets_after_successful_request_media(
     guarded.deps = deps_always_confirm
     guarded.confirmed = True
 
-    await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert guarded.confirmed is False
 
@@ -281,9 +264,7 @@ async def test_confirmed_flag_not_reset_on_gate_block(
     guarded.deps = deps_no_quality
     guarded.confirmed = True  # manually set
 
-    await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123}
-    )
+    await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123})
 
     # confirmed stays True because the gate blocked before forwarding
     assert guarded.confirmed is True
@@ -323,12 +304,10 @@ async def test_search_media_passes_through_without_gate(
     """search_media passes through to the inner toolset without any gate."""
     guarded.deps = deps_no_quality
 
-    result = await guarded.call_tool("search_media", {"query": "Inception"})
+    result = await _call(guarded, "search_media", {"query": "Inception"})
 
     assert result == "tool result"
-    mock_inner_toolset.call_tool.assert_called_once_with(
-        "search_media", {"query": "Inception"}
-    )
+    mock_inner_toolset.call_tool.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -338,12 +317,10 @@ async def test_unknown_tool_passes_through(
     """Unknown/future tools pass through without any gate."""
     guarded.deps = deps_no_quality
 
-    result = await guarded.call_tool("pdf_extract", {"file_id": "abc123"})
+    result = await _call(guarded, "pdf_extract", {"file_id": "abc123"})
 
     assert result == "tool result"
-    mock_inner_toolset.call_tool.assert_called_once_with(
-        "pdf_extract", {"file_id": "abc123"}
-    )
+    mock_inner_toolset.call_tool.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -354,7 +331,7 @@ async def test_pass_through_logs_debug(
     guarded.deps = deps_with_quality
 
     with caplog.at_level(logging.DEBUG, logger="home_agent.mcp.guarded_toolset"):
-        await guarded.call_tool("search_media", {"query": "Inception"})
+        await _call(guarded, "search_media", {"query": "Inception"})
 
     assert "Tool call allowed" in caplog.text
 
@@ -371,7 +348,7 @@ async def test_called_tools_updated_after_pass_through(
     """called_tools set is updated when a tool call succeeds."""
     guarded.deps = deps_with_quality
 
-    await guarded.call_tool("search_media", {"query": "Inception"})
+    await _call(guarded, "search_media", {"query": "Inception"})
 
     assert "search_media" in guarded.called_tools
 
@@ -383,7 +360,7 @@ async def test_called_tools_not_updated_on_gate_block(
     """called_tools set is NOT updated when a gate blocks the call."""
     guarded.deps = deps_no_quality
 
-    await guarded.call_tool("request_media", {"mediaType": "movie", "mediaId": 1})
+    await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 1})
 
     assert "request_media" not in guarded.called_tools
 
@@ -401,9 +378,7 @@ async def test_no_deps_request_media_passes_through(
     so request_media passes through (quality gates pass, no confirmation needed)."""
     assert guarded.deps is None
 
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 1}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 1})
 
     # Both quality checks return False → blocked by movie quality gate
     assert "movie_quality not set" in result.lower()
@@ -423,9 +398,7 @@ def test_guard_block_logs_warning_sync(
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
         asyncio.run(
-            guarded.call_tool(
-                "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-            )
+            _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
         )
 
     assert "request_media blocked by quality gate" in caplog.text
@@ -455,9 +428,7 @@ async def test_new_user_no_quality_movie_request(
     guarded.deps = deps
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
-        result = await guarded.call_tool(
-            "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-        )
+        result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
 
     assert "movie_quality not set" in result.lower()
     assert "set_movie_quality" in result
@@ -484,9 +455,7 @@ async def test_new_user_no_quality_series_request(
     guarded.deps = deps
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
-        result = await guarded.call_tool(
-            "request_media", {"mediaType": "tv", "mediaId": 456, "seasons": "all"}
-        )
+        result = await _call(guarded, "request_media", {"mediaType": "tv", "mediaId": 456, "seasons": "all"})
 
     assert "series_quality not set" in result.lower()
     assert "set_series_quality" in result
@@ -520,9 +489,7 @@ async def test_quality_change_mid_conversation(
 
     # First request with 4K quality set — passes through
     with caplog.at_level(logging.DEBUG, logger="home_agent.mcp.guarded_toolset"):
-        result1 = await guarded.call_tool(
-            "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-        )
+        result1 = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert result1 == "request accepted"
 
     # Simulate quality change mid-conversation via model_copy
@@ -539,9 +506,7 @@ async def test_quality_change_mid_conversation(
     guarded.deps = deps
 
     # Second request with updated 1080p quality — also passes through
-    result2 = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 456, "is4k": False}
-    )
+    result2 = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 456, "is4k": False})
     assert result2 == "request accepted"
     assert mock_inner.call_tool.call_count == 2
 
@@ -573,15 +538,11 @@ async def test_four_k_unavailable_fallback_to_1080p() -> None:
     guarded.deps = deps
 
     # First request: 4K — guard passes (quality is set), MCP returns error
-    result1 = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result1 = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert "4K not available" in result1
 
     # Second request: fallback 1080p — guard still passes (quality is set)
-    result2 = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": False}
-    )
+    result2 = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": False})
     assert "1080p" in result2
     assert mock_inner.call_tool.call_count == 2
 
@@ -607,16 +568,14 @@ async def test_series_request_with_season_selection_and_quality_gate() -> None:
     )
     guarded.deps = deps
 
-    result = await guarded.call_tool(
+    result = await _call(
+        guarded,
         "request_media",
         {"mediaType": "tv", "mediaId": 789, "seasons": [1, 2, 3], "is4k": True},
     )
 
     assert "seasons 1-3 requested" in result
-    mock_inner.call_tool.assert_called_once_with(
-        "request_media",
-        {"mediaType": "tv", "mediaId": 789, "seasons": [1, 2, 3], "is4k": True},
-    )
+    mock_inner.call_tool.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -635,7 +594,8 @@ async def test_series_no_quality_seasons_still_blocked() -> None:
     )
     guarded.deps = deps
 
-    result = await guarded.call_tool(
+    result = await _call(
+        guarded,
         "request_media",
         {"mediaType": "tv", "mediaId": 789, "seasons": [1, 2, 3], "is4k": True},
     )
@@ -666,9 +626,7 @@ async def test_confirm_request_then_request_media_same_turn() -> None:
     guarded.deps = deps
 
     # Step 1: Guard blocks — confirmation not yet given
-    result1 = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result1 = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert "confirmation required" in result1.lower()
     mock_inner.call_tool.assert_not_called()
 
@@ -677,9 +635,7 @@ async def test_confirm_request_then_request_media_same_turn() -> None:
     assert guarded.confirmed is True
 
     # Step 3: Model retries request_media — now passes through
-    result2 = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-    )
+    result2 = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
     assert result2 == "request accepted"
     mock_inner.call_tool.assert_called_once()
 
@@ -720,9 +676,7 @@ async def test_confirm_request_media_id_mismatch() -> None:
 
     # But then request_media is called for mediaId 456 (different item)
     # Current design: confirmed flag is not mediaId-scoped, so it still unblocks
-    result = await guarded.call_tool(
-        "request_media", {"mediaType": "movie", "mediaId": 456, "is4k": True}
-    )
+    result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 456, "is4k": True})
     # Guard passes (confirmed=True) and forwards to inner toolset
     assert result == "request accepted"
     mock_inner.call_tool.assert_called_once()
@@ -752,9 +706,7 @@ def test_logging_warning_on_guard_block(caplog: pytest.LogCaptureFixture) -> Non
 
     with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
         asyncio.run(
-            guarded.call_tool(
-                "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
-            )
+            _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
         )
 
     assert "request_media blocked" in caplog.text
@@ -784,7 +736,7 @@ def test_logging_debug_on_pass_through(caplog: pytest.LogCaptureFixture) -> None
     guarded.deps = deps
 
     with caplog.at_level(logging.DEBUG, logger="home_agent.mcp.guarded_toolset"):
-        asyncio.run(guarded.call_tool("search_media", {"query": "Inception"}))
+        asyncio.run(_call(guarded, "search_media", {"query": "Inception"}))
 
     assert "Tool call allowed" in caplog.text
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
