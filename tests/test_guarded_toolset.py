@@ -429,3 +429,381 @@ def test_guard_block_logs_warning_sync(
         )
 
     assert "request_media blocked by quality gate" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Edge case: new user with no quality set
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_user_no_quality_movie_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """New user with no quality set requests a movie — guard blocks with set_movie_quality hint."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="tool result")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality=None, series_quality=None, confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
+        result = await guarded.call_tool(
+            "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+        )
+
+    assert "movie_quality not set" in result.lower()
+    assert "set_movie_quality" in result
+    assert "request_media blocked" in caplog.text
+    mock_inner.call_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_new_user_no_quality_series_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """New user with no quality set requests a series — guard blocks with set_series_quality hint."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="tool result")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality=None, series_quality=None, confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
+        result = await guarded.call_tool(
+            "request_media", {"mediaType": "tv", "mediaId": 456, "seasons": "all"}
+        )
+
+    assert "series_quality not set" in result.lower()
+    assert "set_series_quality" in result
+    assert "request_media blocked" in caplog.text
+    mock_inner.call_tool.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Edge case: quality change mid-conversation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_quality_change_mid_conversation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """User changes quality preference mid-conversation — updated value is used on next request."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="request accepted")
+    guarded = GuardedToolset(mock_inner)
+
+    profile = make_profile(movie_quality="4k", series_quality="1080p", confirmation_mode="never")
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    # First request with 4K quality set — passes through
+    with caplog.at_level(logging.DEBUG, logger="home_agent.mcp.guarded_toolset"):
+        result1 = await guarded.call_tool(
+            "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+        )
+    assert result1 == "request accepted"
+
+    # Simulate quality change mid-conversation via model_copy
+    profile = profile.model_copy(
+        update={"media_preferences": profile.media_preferences.model_copy(update={"movie_quality": "1080p"})}
+    )
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    # Second request with updated 1080p quality — also passes through
+    result2 = await guarded.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 456, "is4k": False}
+    )
+    assert result2 == "request accepted"
+    assert mock_inner.call_tool.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Edge case: 4K unavailable — fallback to 1080p
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_four_k_unavailable_fallback_to_1080p() -> None:
+    """4K request fails at the MCP level — user can retry with is4k=False without re-triggering guard."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(
+        side_effect=[
+            "ERROR: 4K not available for this title",
+            "Request accepted in 1080p",
+        ]
+    )
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality="4k", series_quality="1080p", confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    # First request: 4K — guard passes (quality is set), MCP returns error
+    result1 = await guarded.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    assert "4K not available" in result1
+
+    # Second request: fallback 1080p — guard still passes (quality is set)
+    result2 = await guarded.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": False}
+    )
+    assert "1080p" in result2
+    assert mock_inner.call_tool.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Edge case: series request with season selection and quality gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_series_request_with_season_selection_and_quality_gate() -> None:
+    """Series request with specific seasons respects quality gate and passes seasons through."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="seasons 1-3 requested in 4K")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality="4k", series_quality="4k", confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    result = await guarded.call_tool(
+        "request_media",
+        {"mediaType": "tv", "mediaId": 789, "seasons": [1, 2, 3], "is4k": True},
+    )
+
+    assert "seasons 1-3 requested" in result
+    mock_inner.call_tool.assert_called_once_with(
+        "request_media",
+        {"mediaType": "tv", "mediaId": 789, "seasons": [1, 2, 3], "is4k": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_series_no_quality_seasons_still_blocked() -> None:
+    """Series request with seasons is blocked if series_quality not set — seasons don't bypass gate."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="tool result")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality="4k", series_quality=None, confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    result = await guarded.call_tool(
+        "request_media",
+        {"mediaType": "tv", "mediaId": 789, "seasons": [1, 2, 3], "is4k": True},
+    )
+
+    assert "series_quality not set" in result.lower()
+    mock_inner.call_tool.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Edge case: confirm_request then request_media in same turn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_then_request_media_same_turn() -> None:
+    """Simulate full confirm flow: guard blocks → set_confirmed → request_media succeeds."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="request accepted")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality="4k", series_quality="1080p", confirmation_mode="always"),
+        guarded_toolsets=[guarded],
+    )
+    guarded.deps = deps
+
+    # Step 1: Guard blocks — confirmation not yet given
+    result1 = await guarded.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    assert "confirmation required" in result1.lower()
+    mock_inner.call_tool.assert_not_called()
+
+    # Step 2: Model calls confirm_request tool (simulate by calling set_confirmed)
+    guarded.set_confirmed(mediaId=123, mediaType="movie")
+    assert guarded.confirmed is True
+
+    # Step 3: Model retries request_media — now passes through
+    result2 = await guarded.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    assert result2 == "request accepted"
+    mock_inner.call_tool.assert_called_once()
+
+    # Step 4: Confirmed flag is reset after success
+    assert guarded.confirmed is False
+
+
+# ---------------------------------------------------------------------------
+# Edge case: confirm_request for wrong media ID
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_media_id_mismatch() -> None:
+    """confirm_request sets confirmed flag regardless of mediaId — guard unblocks any request_media.
+
+    Design note: the confirmed flag is intentionally not mediaId-scoped. The
+    conversation context is expected to ensure only one media item is in flight.
+    A mismatch scenario is technically allowed by the current guard design.
+    Future iteration may add strict mediaId matching.
+    """
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="request accepted")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality="4k", series_quality="1080p", confirmation_mode="always"),
+        guarded_toolsets=[guarded],
+    )
+    guarded.deps = deps
+
+    # Confirm for mediaId 123
+    guarded.set_confirmed(mediaId=123, mediaType="movie")
+    assert guarded.confirmed is True
+
+    # But then request_media is called for mediaId 456 (different item)
+    # Current design: confirmed flag is not mediaId-scoped, so it still unblocks
+    result = await guarded.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 456, "is4k": True}
+    )
+    # Guard passes (confirmed=True) and forwards to inner toolset
+    assert result == "request accepted"
+    mock_inner.call_tool.assert_called_once()
+    # Flag reset after successful pass-through
+    assert guarded.confirmed is False
+
+
+# ---------------------------------------------------------------------------
+# Logging verification: WARNING on guard block
+# ---------------------------------------------------------------------------
+
+
+def test_logging_warning_on_guard_block(caplog: pytest.LogCaptureFixture) -> None:
+    """Guard block emits WARNING log containing tool name and reason (sync via asyncio.run)."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="tool result")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality=None, series_quality=None, confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    with caplog.at_level(logging.WARNING, logger="home_agent.mcp.guarded_toolset"):
+        asyncio.run(
+            guarded.call_tool(
+                "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+            )
+        )
+
+    assert "request_media blocked" in caplog.text
+    # Confirm the log level is WARNING
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Logging verification: DEBUG on pass-through
+# ---------------------------------------------------------------------------
+
+
+def test_logging_debug_on_pass_through(caplog: pytest.LogCaptureFixture) -> None:
+    """Pass-through tool call emits DEBUG log with tool name (sync via asyncio.run)."""
+    mock_inner = AsyncMock()
+    mock_inner.call_tool = AsyncMock(return_value="search results")
+    guarded = GuardedToolset(mock_inner)
+
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=make_profile(movie_quality=None, series_quality=None, confirmation_mode="never"),
+        guarded_toolsets=[],
+    )
+    guarded.deps = deps
+
+    with caplog.at_level(logging.DEBUG, logger="home_agent.mcp.guarded_toolset"):
+        asyncio.run(guarded.call_tool("search_media", {"query": "Inception"}))
+
+    assert "Tool call allowed" in caplog.text
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("search_media" in str(r.getMessage()) or "search_media" in str(getattr(r, "tool", "")) for r in debug_records)
+
+
+# ---------------------------------------------------------------------------
+# Logging verification: INFO on confirm_request
+# ---------------------------------------------------------------------------
+
+
+def test_logging_info_on_confirm_request(caplog: pytest.LogCaptureFixture) -> None:
+    """set_confirmed() emits INFO log with mediaId and mediaType."""
+    mock_inner = AsyncMock()
+    guarded = GuardedToolset(mock_inner)
+
+    with caplog.at_level(logging.INFO, logger="home_agent.mcp.guarded_toolset"):
+        guarded.set_confirmed(mediaId=42, mediaType="movie")
+
+    assert "confirm_request called" in caplog.text
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_records) >= 1

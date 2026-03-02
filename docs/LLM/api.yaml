@@ -430,3 +430,114 @@ modules:
         type: "string constant"
         description: "System prompt for the agent. Simplified to remove hard-enforcement language (MUST, NEVER, STOP) for gates now enforced in code. Kept happy-path guidance (search → disambiguate → quality → confirm → request) and tone guidance. Added confirm_request to available tools list and step 4 guidance."
 
+# ── Tool Control Architecture ────────────────────────────────────────────────
+tool_control:
+  architecture: "Option B (subclassed MCP client) + thin Option A wrappers"
+  source: "docs/LLM/other/tool_control.md"
+  summary: |
+    GuardedToolset wraps FastMCPToolset and intercepts call_tool() to apply hard gates
+    before forwarding to the real toolset. Gates return plain English error strings that
+    the LLM reads as tool results and must respond to. All non-gated tools pass through
+    transparently, so new MCP servers (PDF, file converter, Glances) can be added without
+    any guard code changes.
+
+  guarded_toolset:
+    description: "Wraps FastMCPToolset and intercepts call_tool() to apply hard gates before forwarding to real toolset. All non-gated tools pass through transparently."
+    location: "src/home_agent/mcp/guarded_toolset.py"
+
+    gates:
+      - name: "movie_quality_required"
+        triggers_on: "request_media with mediaType='movie' and movie_quality=None in user profile"
+        behavior: "Returns error string: 'STOP: movie_quality not set. Ask the user... Then call set_movie_quality with their answer.'"
+        logging: "WARNING: 'request_media blocked by quality gate' with reason=movie_quality_not_set"
+        example_log: "WARNING home_agent.mcp.guarded_toolset - request_media blocked by quality gate"
+
+      - name: "series_quality_required"
+        triggers_on: "request_media with mediaType='tv' and series_quality=None in user profile"
+        behavior: "Returns error string: 'STOP: series_quality not set. Ask the user... Then call set_series_quality with their answer.'"
+        logging: "WARNING: 'request_media blocked by quality gate' with reason=series_quality_not_set"
+        example_log: "WARNING home_agent.mcp.guarded_toolset - request_media blocked by quality gate"
+
+      - name: "confirmation_required"
+        triggers_on: "request_media when confirmation_mode='always' and confirmed flag is False"
+        behavior: "Returns error string: 'STOP: Confirmation required. Show the user exactly what you're about to request (title, year, quality) and call confirm_request with mediaId and mediaType after they approve.'"
+        logging: "WARNING: 'request_media blocked by confirmation gate' with reason=confirmation_required"
+        example_log: "WARNING home_agent.mcp.guarded_toolset - request_media blocked by confirmation gate"
+
+    pass_through:
+      description: "All other tools (search_media, get_media_details, manage_media_requests, and any future tools from other MCP servers) pass through without any gate."
+      logging: "DEBUG: 'Tool call allowed' with tool=<name>"
+      example_log: "DEBUG home_agent.mcp.guarded_toolset - Tool call allowed"
+
+    confirmed_flag_lifecycle:
+      set_by: "set_confirmed(mediaId, mediaType) — called by confirm_request agent tool"
+      reset_after: "Successful request_media call — so next request requires fresh confirmation"
+      not_mediaId_scoped: "Flag is intentionally not tied to a specific mediaId — conversation context is expected to keep one media item in flight at a time"
+      logging_on_set: "INFO: 'confirm_request called' with mediaId and mediaType"
+      logging_on_reset: "INFO: 'request_media succeeded, confirmation flag reset'"
+
+  confirm_request_tool:
+    description: "Agent-callable tool that sets the confirmed flag on all GuardedToolset instances in ctx.deps.guarded_toolsets."
+    location: "src/home_agent/tools/profile_tools.py"
+    signature: "confirm_request(ctx: RunContext[AgentDeps], mediaId: int, mediaType: str) -> str"
+    behavior: "Calls set_confirmed(mediaId, mediaType) on every GuardedToolset in guarded_toolsets. Returns confirmation string. Logs at INFO level."
+    logging: "INFO: 'confirm_request called' with mediaId and mediaType (via GuardedToolset.set_confirmed)"
+    phase_4_note: "In Phase 4, this will be triggered by an inline keyboard button press instead of a text 'yes' response."
+
+  workflow:
+    description: "Standard happy-path tool call sequence for media requests"
+    steps:
+      - step: 1
+        action: "search_media(query)"
+        gate: "none — always passes through"
+        log: "DEBUG: Tool call allowed"
+      - step: 2
+        action: "request_media(mediaType, mediaId, is4k)"
+        gate: "quality gate — blocked if movie_quality or series_quality not set"
+        on_block: "Model asks user for quality preference and calls set_movie_quality or set_series_quality"
+        log_on_block: "WARNING: request_media blocked by quality gate"
+      - step: 3
+        action: "request_media(mediaType, mediaId, is4k) [retry after quality set]"
+        gate: "confirmation gate — blocked if confirmation_mode='always' and confirmed=False"
+        on_block: "Model shows user what it's about to request and awaits approval"
+        log_on_block: "WARNING: request_media blocked by confirmation gate"
+      - step: 4
+        action: "confirm_request(mediaId, mediaType)"
+        gate: "none — agent tool, not an MCP tool"
+        effect: "Sets confirmed=True on all GuardedToolsets"
+        log: "INFO: confirm_request called"
+      - step: 5
+        action: "request_media(mediaType, mediaId, is4k) [retry after confirmation]"
+        gate: "passes — quality set and confirmed=True"
+        effect: "Forwards to inner toolset; resets confirmed=False after success"
+        log: "DEBUG: Tool call allowed; INFO: request_media succeeded, confirmation flag reset"
+
+  edge_cases:
+    - scenario: "New user with no quality set requesting a movie"
+      behaviour: "quality gate fires immediately on first request_media call; model asks for preference"
+      test: "test_new_user_no_quality_movie_request in test_guarded_toolset.py"
+
+    - scenario: "New user with no quality set requesting a TV series"
+      behaviour: "quality gate fires for series_quality; model asks for series quality preference"
+      test: "test_new_user_no_quality_series_request in test_guarded_toolset.py"
+
+    - scenario: "Quality change mid-conversation"
+      behaviour: "GuardedToolset reads quality from deps.user_profile at call time; updated quality is used immediately on next request_media call"
+      test: "test_quality_change_mid_conversation in test_guarded_toolset.py"
+
+    - scenario: "4K unavailable — fallback to 1080p"
+      behaviour: "Guard only checks quality is SET, not what value. MCP returns 4K error; model retries with is4k=False. Both calls pass through guard (quality is set)."
+      test: "test_four_k_unavailable_fallback_to_1080p in test_guarded_toolset.py"
+
+    - scenario: "Series request with season selection and quality gate"
+      behaviour: "Seasons parameter is passed through unchanged; guard only checks series_quality presence"
+      test: "test_series_request_with_season_selection_and_quality_gate in test_guarded_toolset.py"
+
+    - scenario: "confirm_request then request_media in same turn"
+      behaviour: "Guard blocks → model calls set_confirmed → confirmed=True → model retries request_media → passes through → confirmed reset to False"
+      test: "test_confirm_request_then_request_media_same_turn in test_guarded_toolset.py"
+
+    - scenario: "confirm_request for wrong media ID"
+      behaviour: "confirmed flag is not mediaId-scoped; set_confirmed(123) also unblocks request_media(456). Design decision: conversation context keeps one item in flight."
+      test: "test_confirm_request_media_id_mismatch in test_guarded_toolset.py"
+

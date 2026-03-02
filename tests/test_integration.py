@@ -464,6 +464,130 @@ async def test_confirm_request_tool_end_to_end(
     guarded_toolset.set_confirmed.assert_called_once()
 
 
+async def test_e2e_new_user_quality_gate_blocks_request(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """E2E: New user with no quality set — guard blocks request_media and asks for preference.
+
+    Verifies that when a new user (no quality in profile) triggers the agent,
+    and the agent tries to call request_media via a GuardedToolset, the quality
+    gate fires and the toolset returns the blocking error string.
+    """
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    # New user: quality not set
+    profile = UserProfile(
+        user_id=12345,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        media_preferences=MediaPreferences(movie_quality=None),
+        confirmation_mode="never",
+    )
+    await profile_manager.save(profile)
+
+    # Mock inner toolset (should never be called — guard intercepts first)
+    mock_inner = MagicMock()
+    mock_inner.call_tool = AsyncMock(return_value="should not reach here")
+    guarded_toolset = GuardedToolset(mock_inner)
+
+    mock_result = MagicMock()
+    mock_result.output = "What quality do you prefer for movies?"
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(
+        integration_config,
+        profile_manager,
+        history_manager,
+        mock_agent,
+        guarded_toolsets=[guarded_toolset],
+    )
+    update = make_update("I want to watch Inception", user_id=12345)
+    await handler(update, MagicMock())
+
+    # Bot sets deps on the guarded toolset before agent.run()
+    assert guarded_toolset.deps is not None
+    assert guarded_toolset.deps.user_profile.user_id == 12345
+    assert guarded_toolset.deps.user_profile.media_preferences.movie_quality is None
+
+    # Simulate what the agent would do: call request_media directly on the guarded toolset
+    # (Since we mocked the agent, we test the guard behaviour directly)
+    result = await guarded_toolset.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    assert "movie_quality not set" in result.lower()
+    assert "set_movie_quality" in result
+    mock_inner.call_tool.assert_not_called()
+
+
+async def test_e2e_confirmation_mode_always_flow(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """E2E: User with confirmation_mode='always' — confirm_request gate works end-to-end.
+
+    Verifies that:
+    1. bot.py injects deps with correct confirmation_mode into the GuardedToolset
+    2. Without set_confirmed, request_media is blocked
+    3. After set_confirmed, request_media succeeds
+    """
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    profile = UserProfile(
+        user_id=12345,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        media_preferences=MediaPreferences(movie_quality="4k", series_quality="1080p"),
+        confirmation_mode="always",
+    )
+    await profile_manager.save(profile)
+
+    mock_inner = MagicMock()
+    mock_inner.call_tool = AsyncMock(return_value="Request accepted!")
+    guarded_toolset = GuardedToolset(mock_inner)
+
+    mock_result = MagicMock()
+    mock_result.output = "Please confirm: request Inception in 4K?"
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(
+        integration_config,
+        profile_manager,
+        history_manager,
+        mock_agent,
+        guarded_toolsets=[guarded_toolset],
+    )
+    update = make_update("Request Inception", user_id=12345)
+    await handler(update, MagicMock())
+
+    # Deps injected: confirmation_mode is 'always'
+    assert guarded_toolset.deps is not None
+    assert guarded_toolset.deps.user_profile.confirmation_mode == "always"
+
+    # Without confirmation → guard blocks
+    result_blocked = await guarded_toolset.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    assert "confirmation required" in result_blocked.lower()
+    mock_inner.call_tool.assert_not_called()
+
+    # After confirmation → guard passes
+    guarded_toolset.set_confirmed(mediaId=123, mediaType="movie")
+    result_allowed = await guarded_toolset.call_tool(
+        "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    assert result_allowed == "Request accepted!"
+    mock_inner.call_tool.assert_called_once()
+
+
 async def test_language_switch_persists_across_messages(
     integration_config: AppConfig,
     integration_db: Path,
