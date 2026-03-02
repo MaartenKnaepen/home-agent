@@ -339,3 +339,44 @@ modules:
         signature: "async (messages: list[ModelMessage], model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters) -> AsyncIterator[StreamedResponse]"
         description: "Delegate streaming request to inner model without retry. Uses @asynccontextmanager."
 
+  # ── src/home_agent/mcp/guarded_toolset.py ──────────────────────────────────
+  - module: "src/home_agent/mcp/guarded_toolset.py"
+    exports:
+      - name: "GuardedToolset"
+        type: "class"
+        signature: "(inner_toolset: Any)"
+        description: "Wraps a FastMCPToolset and intercepts call_tool() to enforce hard gates before forwarding to the inner toolset. Implements Option B from tool_control.md. All non-gated tools pass through transparently, allowing new MCP servers (PDF, file converter, Glances) to be added without guard code changes."
+
+      - name: "GuardedToolset.call_tool"
+        type: "method"
+        signature: "async (name: str, arguments: dict[str, Any]) -> str"
+        description: "Intercept tool call and apply guard rules before forwarding to inner_toolset. Quality gate: blocks request_media if movie_quality or series_quality not set. Confirmation gate: blocks request_media if confirmation_mode='always' and confirmed flag not set. Returns plain English error strings that the model must respond to. All other tools pass through unmodified."
+
+      - name: "GuardedToolset.set_confirmed"
+        type: "method"
+        signature: "(mediaId: int, mediaType: str) -> None"
+        description: "Set the confirmed flag to unblock request_media when confirmation_mode='always'. Called by confirm_request tool. Logs at INFO level. Flag resets to False after successful request_media call."
+
+      - name: "GuardedToolset.deps"
+        type: "attribute"
+        signature: "Any | None"
+        description: "Reference to AgentDeps instance. Set by bot.py before each agent.run() call. Provides access to user_profile.media_preferences and user_profile.confirmation_mode at tool-call time."
+
+      - name: "GuardedToolset.confirmed"
+        type: "attribute"
+        signature: "bool"
+        description: "Ephemeral flag set by set_confirmed() and reset after successful request_media. Not persisted — conversational state within a single turn."
+
+      - name: "GuardedToolset.called_tools"
+        type: "attribute"
+        signature: "set[str]"
+        description: "Tracks which tools have been called (successfully or blocked) in the current turn. For audit and future sequencing rules."
+
+  # ── src/home_agent/tools/profile_tools.py ────────────────────────────────────
+  - module: "src/home_agent/tools/profile_tools.py"
+    exports:
+      - name: "confirm_request"
+        type: "function (@agent.tool)"
+        signature: "(ctx: RunContext[AgentDeps], mediaId: int, mediaType: str) -> str"
+        description: "Agent-callable tool to set the confirmed flag on GuardedToolset instances. Call after the user approves a media request. In Phase 4, this will be triggered by an inline keyboard button press instead of text 'yes'. Takes mediaId and mediaType for audit trail. Returns confirmation string. Logs at INFO level."
+
