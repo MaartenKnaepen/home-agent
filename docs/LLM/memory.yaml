@@ -79,6 +79,9 @@ current_state:
     - "GuardedToolset logging: WARNING on gate blocks, DEBUG on pass-throughs, INFO on confirm_request and request_media success"
     - "AgentDeps extended with guarded_toolsets: list[GuardedToolset] field for access to confirmed flag"
     - "confirm_request tool uses getattr(ctx.deps, 'guarded_toolsets', []) for defensive access"
+    - "LESSON LEARNED: GuardedToolset initially was a plain class (not AbstractToolset subclass) — caused 'object is not callable' at runtime. Fix: subclass AbstractToolset, implement get_tools(ctx), call_tool(name, tool_args, ctx, tool) with exact 4-arg signature, id property, __aenter__/__aexit__ delegating to inner toolset."
+    - "LESSON LEARNED: MagicMock(spec=X) bypasses PydanticAI protocol checks — tests were green, production crashed. Rule: every framework-integrated class needs at least one test through the real framework call path. See AGENTS.md '⚠️ Framework Boundary Testing' section."
+    - "Framework boundary tests added: real GuardedToolset (not mock) in test_agent.py and test_integration.py. Six profile tool integration tests via agent.run() in test_profile_tools.py. RetryingModel via real Agent() + agent.override() in test_retry_model.py. 171 tests pass."
   known_issues: []
 
 completed_steps:

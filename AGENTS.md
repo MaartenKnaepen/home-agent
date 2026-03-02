@@ -141,6 +141,8 @@ These cause runtime errors if violated:
 | **✅ ALWAYS** use `RunContext[AgentDeps]` as first param in tool functions | Required for dependency access |
 | **✅ ALWAYS** return strings from tool functions | PydanticAI expects string tool results |
 | **✅ Use** `agent.override(model=TestModel())` in tests | Never call real LLMs in tests |
+| **✅ ALWAYS** subclass `AbstractToolset` for custom toolset wrappers | Plain wrapper classes passed to `toolsets=` cause `TypeError: object is not callable` — PydanticAI treats non-`AbstractToolset` objects as callable factories |
+| **✅ ALWAYS** match `call_tool(name, tool_args, ctx, tool)` exactly | Wrong arity is silently absorbed by mocks but crashes at runtime |
 
 ---
 
@@ -496,6 +498,99 @@ def test_db_creation(tmp_path: Path) -> None:
 
 ---
 
+### ⚠️ Framework Boundary Testing — The Most Important Rule
+
+> **`MagicMock(spec=SomeClass)` bypasses every framework protocol check. Green tests, broken production.**
+
+**The anti-pattern:** Mocking a class that plugs into a framework means the framework never validates it. Method signatures, return types, abstract base classes, lifecycle hooks — all invisible to your tests.
+
+**The rule:** For every class that integrates with a framework (PydanticAI, python-telegram-bot, aiosqlite), **at least one test must exercise it through the real framework call path**.
+
+#### What "framework boundary" means in this project
+
+| Integration point | Framework validates | Safe mock level | Required real test |
+|---|---|---|---|
+| `GuardedToolset` / custom toolsets | `AbstractToolset` subclass, `call_tool` arity, `get_tools` return type | Inner `FastMCPToolset` only | Pass real `GuardedToolset` to real `Agent()`, call `agent.run()` |
+| `@agent.tool` functions | Return type is `str`, `RunContext` first arg, async | None — call through agent only | `agent.run()` with `TestModel()` that triggers the tool |
+| `RetryingModel` / custom models | PydanticAI model protocol | Inner model only | `agent.run()` with real `RetryingModel` wrapping `TestModel()` |
+| Telegram handlers | `Update` structure, handler signature | `MagicMock(spec=Update)` is OK for handler logic | One test with real `Application` dispatching a real `Update` |
+| `aiosqlite` queries | SQL syntax, column names, types | In-memory or `tmp_path` DB — never mock | All DB tests use real `tmp_path` DB |
+
+#### The correct pattern for toolset wrappers
+
+```python
+# ❌ WRONG — MagicMock bypasses AbstractToolset check entirely
+mock_toolset = MagicMock(spec=GuardedToolset)
+agent = create_agent(config, toolsets=[mock_toolset])  # Passes! But production crashes.
+
+# ✅ RIGHT — use a real instance with a mocked inner toolset
+from unittest.mock import AsyncMock, MagicMock
+from pydantic_ai.toolsets.abstract import ToolsetTool
+
+inner = MagicMock()
+inner.id = "test-server"
+inner.__aenter__ = AsyncMock(return_value=inner)
+inner.__aexit__ = AsyncMock(return_value=None)
+inner.get_tools = AsyncMock(return_value={})
+inner.call_tool = AsyncMock(return_value="mock result")
+
+guarded = GuardedToolset(inner)  # Real instance — AbstractToolset contract enforced
+
+async with agent:  # Lifecycle runs through real __aenter__/__aexit__
+    result = await agent.run("test", deps=deps)  # PydanticAI validates toolset protocol
+```
+
+#### The correct pattern for agent tools
+
+```python
+# ❌ WRONG — calling tool function directly bypasses PydanticAI validation
+result = await update_user_note(ctx, "some note")  # Return type? RunContext type? Never checked.
+
+# ✅ RIGHT — use TestModel to exercise the tool through agent.run()
+@pytest.mark.asyncio
+async def test_update_user_note_tool(mock_deps):
+    """update_user_note tool is callable via agent and returns a string."""
+    m = TestModel(custom_result_args={"tool_name": "update_user_note", "args": {"note": "likes action movies"}})
+    with agent.override(model=m):
+        result = await agent.run("remember I like action movies", deps=mock_deps)
+    assert result.output is not None
+    # Verify the tool was actually called by checking side effects
+    mock_deps.profile_manager.save.assert_called_once()
+```
+
+#### The correct pattern for Telegram handlers
+
+```python
+# ❌ WRONG — MagicMock(spec=Update) allows any attribute access, no Telegram validation
+update = MagicMock(spec=Update)
+update.effective_user.id = 99999  # Works in test, but real Telegram Update is immutable
+
+# ✅ RIGHT — construct real Telegram objects
+from telegram import Update, User, Message, Chat
+from telegram.ext import Application
+
+user = User(id=99999, is_bot=False, first_name="Test")
+chat = Chat(id=99999, type="private")
+message = MagicMock(spec=Message)  # Message internals OK to mock
+message.text = "hello"
+message.from_user = user
+message.chat = chat
+message.reply_text = AsyncMock()
+update = MagicMock(spec=Update)
+update.effective_user = user  # Real User object
+update.effective_message = message
+update.message = message
+```
+
+#### Checklist: before writing any test involving a framework class
+
+1. **Is this class passed to a framework constructor or decorator?** → Must use real instance in at least one test.
+2. **Does this class subclass a framework ABC?** → Must verify the subclass is correct, not just that mocks pass.
+3. **Does this class have methods called by the framework with specific signatures?** → Must verify arity matches exactly, not just that the method exists.
+4. **Is the test only exercising internal logic?** → Unit tests with mocks are fine, **but there must also be a separate integration test** that runs through the framework.
+
+---
+
 ## 📁 7. File Organization Reference
 
 ```
@@ -623,6 +718,8 @@ Before generating code, verify:
 10. **Logging:** Using `logging.getLogger(__name__)`, not `print()`?
 11. **Tests:** Using `TestModel` for agent? Mocking at import location? `tmp_path` for file I/O?
 12. **MCP servers:** Searched for existing first? Built custom only as last resort?
+13. **Framework boundaries:** For every class that integrates with a framework (PydanticAI toolset, Telegram handler, aiosqlite), is there at least one test that runs it through the real framework call path (not just `MagicMock(spec=...)`)?
+14. **Custom toolsets:** If writing a toolset wrapper, does it subclass `AbstractToolset`? Does `call_tool` have the exact 4-arg signature `(name, tool_args, ctx, tool)`?
 
 ## 11. cache.overflow — Verified Knowledge Exchange
 cache.overflow is a shared knowledge base of verified solutions for software and coding problems. Use it to avoid re-solving problems that other agents have already solved, and to contribute solutions back for future agents.

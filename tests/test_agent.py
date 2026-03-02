@@ -500,17 +500,32 @@ async def test_static_prompt_handles_franchise_disambiguation(
 # ---------------------------------------------------------------------------
 
 
-def test_create_agent_with_guarded_toolsets() -> None:
-    """create_agent() accepts GuardedToolset instances and returns a valid agent."""
-    from unittest.mock import MagicMock
+async def test_create_agent_with_guarded_toolsets() -> None:
+    """create_agent() accepts real GuardedToolset instances and lifecycle works.
+
+    Uses a real GuardedToolset wrapping a mocked inner toolset to exercise
+    PydanticAI's AbstractToolset protocol check — not bypassed by MagicMock.
+    """
+    from unittest.mock import AsyncMock, MagicMock
 
     from home_agent.mcp.guarded_toolset import GuardedToolset
 
-    guarded_toolset = MagicMock(spec=GuardedToolset)
-    agent_instance = create_agent(toolsets=[guarded_toolset])
+    inner = MagicMock()
+    inner.id = "test-server"
+    inner.__aenter__ = AsyncMock(return_value=inner)
+    inner.__aexit__ = AsyncMock(return_value=None)
+    inner.get_tools = AsyncMock(return_value={})
+    inner.call_tool = AsyncMock(return_value="mock result")
+
+    guarded = GuardedToolset(inner)  # Real instance — AbstractToolset contract enforced
+    agent_instance = create_agent(toolsets=[guarded])
 
     assert agent_instance is not None
     assert agent_instance.deps_type is AgentDeps
+
+    # Verify PydanticAI accepts the real GuardedToolset through its lifecycle
+    async with agent_instance:
+        pass  # __aenter__/__aexit__ must not raise
 
 
 def test_create_agent_with_none_toolsets() -> None:
@@ -542,8 +557,13 @@ async def test_confirm_request_tool_is_registered(
 async def test_confirm_request_tool_sets_confirmed_flag(
     mock_config: AppConfig, test_db: Path
 ) -> None:
-    """confirm_request tool sets the confirmed flag on all guarded toolsets."""
-    from unittest.mock import MagicMock
+    """confirm_request tool sets .confirmed = True on real GuardedToolset instances.
+
+    Uses a real GuardedToolset (not MagicMock) so PydanticAI's AbstractToolset
+    protocol is actually enforced. Verifies the real .confirmed flag flips to True
+    rather than just asserting a mock method was called.
+    """
+    from unittest.mock import AsyncMock, MagicMock
 
     from home_agent.mcp.guarded_toolset import GuardedToolset
     from home_agent.profile import MediaPreferences
@@ -551,8 +571,16 @@ async def test_confirm_request_tool_sets_confirmed_flag(
     profile_manager = ProfileManager(test_db)
     history_manager = HistoryManager(test_db)
 
-    guarded_toolset = MagicMock(spec=GuardedToolset)
-    guarded_toolset.set_confirmed = MagicMock()
+    # Real GuardedToolset wrapping a mocked inner toolset
+    inner = MagicMock()
+    inner.id = "test-server"
+    inner.__aenter__ = AsyncMock(return_value=inner)
+    inner.__aexit__ = AsyncMock(return_value=None)
+    inner.get_tools = AsyncMock(return_value={})
+    inner.call_tool = AsyncMock(return_value="mock result")
+
+    guarded_toolset = GuardedToolset(inner)  # Real instance — .confirmed is a real bool
+    assert guarded_toolset.confirmed is False  # Starts unconfirmed
 
     profile = UserProfile(
         user_id=200,
@@ -575,8 +603,8 @@ async def test_confirm_request_tool_sets_confirmed_flag(
         async with agent_instance:
             await agent_instance.run("yes, confirm it", deps=deps)
 
-    # set_confirmed should have been called on the guarded toolset
-    guarded_toolset.set_confirmed.assert_called_once()
+    # The real .confirmed flag must be True — not a mock assertion
+    assert guarded_toolset.confirmed is True
 
 
 async def test_all_profile_tools_registered(

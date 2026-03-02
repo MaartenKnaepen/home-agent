@@ -371,8 +371,13 @@ async def test_bot_passes_guarded_toolsets_in_agent_deps(
     profile_manager = ProfileManager(db_path=integration_db)
     history_manager = HistoryManager(db_path=integration_db)
 
-    guarded_toolset = MagicMock(spec=GuardedToolset)
-    guarded_toolset.deps = None
+    inner = MagicMock()
+    inner.id = "test-server"
+    inner.__aenter__ = AsyncMock(return_value=inner)
+    inner.__aexit__ = AsyncMock(return_value=None)
+    inner.get_tools = AsyncMock(return_value={})
+    inner.call_tool = AsyncMock(return_value="mock result")
+    guarded_toolset = GuardedToolset(inner)  # Real instance — AbstractToolset protocol enforced
 
     mock_result = MagicMock()
     mock_result.output = "OK!"
@@ -447,8 +452,13 @@ async def test_confirm_request_tool_end_to_end(
     )
     await profile_manager.save(profile)
 
-    guarded_toolset = MagicMock(spec=GuardedToolset)
-    guarded_toolset.set_confirmed = MagicMock()
+    inner = MagicMock()
+    inner.id = "test-server"
+    inner.__aenter__ = AsyncMock(return_value=inner)
+    inner.__aexit__ = AsyncMock(return_value=None)
+    inner.get_tools = AsyncMock(return_value={})
+    inner.call_tool = AsyncMock(return_value="mock result")
+    guarded_toolset = GuardedToolset(inner)  # Real instance — AbstractToolset protocol enforced
 
     agent_instance = create_agent()
     m = TestModel(call_tools=["confirm_request"])
@@ -465,8 +475,8 @@ async def test_confirm_request_tool_end_to_end(
         async with agent_instance:
             await agent_instance.run("yes, confirm the request", deps=deps)
 
-    # set_confirmed should have been called on the guarded toolset
-    guarded_toolset.set_confirmed.assert_called_once()
+    # confirmed flag should be True on the real GuardedToolset instance
+    assert guarded_toolset.confirmed is True
 
 
 async def test_e2e_new_user_quality_gate_blocks_request(

@@ -188,3 +188,41 @@ async def test_on_retry_callback_invoked() -> None:
     assert on_retry.call_count == 2
     on_retry.assert_any_call(0, 2.0)
     on_retry.assert_any_call(1, 4.0)
+
+
+@pytest.mark.asyncio
+async def test_retrying_model_works_through_real_agent() -> None:
+    """RetryingModel satisfies PydanticAI Model protocol when used with a real Agent."""
+    from datetime import datetime
+
+    from pydantic_ai.models.test import TestModel
+
+    from home_agent.agent import AgentDeps, create_agent
+    from home_agent.models.retry_model import RetryingModel
+    from home_agent.profile import MediaPreferences, UserProfile
+
+    # Wrap TestModel in RetryingModel — exercises the full protocol chain
+    inner = TestModel()
+    retrying = RetryingModel(inner, max_retries=1, base_delay=0.0, max_delay=0.0)
+
+    agent_instance = create_agent()
+
+    profile = UserProfile(
+        user_id=1,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        media_preferences=MediaPreferences(),
+    )
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=AsyncMock(),
+        history_manager=AsyncMock(),
+        user_profile=profile,
+        guarded_toolsets=[],
+    )
+
+    # Use agent.override to inject the RetryingModel — exercises PydanticAI model protocol
+    with agent_instance.override(model=retrying):
+        result = await agent_instance.run("hello", deps=deps)
+
+    assert result.output is not None

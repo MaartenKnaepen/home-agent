@@ -386,3 +386,193 @@ async def test_confirm_request_logs_info(
         await confirm_request(ctx, mediaId=456, mediaType="tv")
 
     assert "confirm_request called" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Framework boundary integration tests: each tool exercised through agent.run()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_user_note_via_agent_run(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """update_user_note tool saves to profile when triggered via agent.run()."""
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=70)
+
+    # Use a real ProfileManager but spy on save with AsyncMock wrapping
+    profile_manager.save = _AsyncMock(wraps=profile_manager.save)  # type: ignore[method-assign]
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+    )
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["update_user_note"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("remember something about me", deps=deps)
+
+    profile_manager.save.assert_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_set_movie_quality_via_agent_run(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """set_movie_quality tool updates user_profile when triggered via agent.run()."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=71)
+    await profile_manager.save(profile)
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+    )
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["set_movie_quality"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("set my movie quality to 4k", deps=deps)
+
+    # TestModel supplies a str arg; the tool must have run without error
+    # and the profile_manager should have been called to save
+    saved = await profile_manager.get(71)
+    # The TestModel generates a synthetic Literal value; just verify the tool ran
+    assert saved is not None
+
+
+@pytest.mark.asyncio
+async def test_set_series_quality_via_agent_run(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """set_series_quality tool runs without error when triggered via agent.run()."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=72)
+    await profile_manager.save(profile)
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+    )
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["set_series_quality"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            result = await agent_instance.run("set my series quality", deps=deps)
+
+    assert result.output is not None
+
+
+@pytest.mark.asyncio
+async def test_set_reply_language_via_agent_run(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """set_reply_language tool persists change when triggered via agent.run()."""
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=73)
+    await profile_manager.save(profile)
+    profile_manager.save = _AsyncMock(wraps=profile_manager.save)  # type: ignore[method-assign]
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+    )
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["set_reply_language"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("reply to me in Dutch", deps=deps)
+
+    profile_manager.save.assert_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_set_confirmation_mode_via_agent_run(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """set_confirmation_mode tool persists change when triggered via agent.run()."""
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=74)
+    await profile_manager.save(profile)
+    profile_manager.save = _AsyncMock(wraps=profile_manager.save)  # type: ignore[method-assign]
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+    )
+
+    agent_instance = create_agent()
+    m = TestModel(call_tools=["set_confirmation_mode"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("don't ask me to confirm", deps=deps)
+
+    profile_manager.save.assert_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_via_agent_run(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """confirm_request tool sets confirmed=True on a real GuardedToolset via agent.run()."""
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    # Build a real GuardedToolset wrapping a mocked inner toolset
+    inner = MagicMock()
+    inner.id = "test-server"
+    inner.__aenter__ = _AsyncMock(return_value=inner)
+    inner.__aexit__ = _AsyncMock(return_value=None)
+    inner.get_tools = _AsyncMock(return_value={})
+    inner.call_tool = _AsyncMock(return_value="result")
+
+    guarded = GuardedToolset(inner)  # Real instance — AbstractToolset contract enforced
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=75)
+    await profile_manager.save(profile)
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[guarded],
+    )
+
+    agent_instance = create_agent(toolsets=[guarded])
+    m = TestModel(call_tools=["confirm_request"])
+    with agent_instance.override(model=m):
+        async with agent_instance:
+            await agent_instance.run("yes, confirm the request", deps=deps)
+
+    assert guarded.confirmed is True
