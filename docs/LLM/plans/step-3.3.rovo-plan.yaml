@@ -1,0 +1,670 @@
+---
+step: 3.3
+title: Wire GuardedToolset into Agent Pipeline
+goal: Integrate GuardedToolset into the agent lifecycle so all MCP tool calls flow through the guard middleware. Register confirm_request tool. Simplify system prompt.
+
+approach: |
+  Replace raw FastMCPToolset instances with GuardedToolset-wrapped versions.
+  Wire deps injection so GuardedToolset has access to the current user's profile
+  at tool-call time. Simplify the system prompt by removing redundant hard-enforcement
+  language (NEVER, STOP, MUST) that is now enforced in code.
+
+---
+
+## Key Files
+
+### Modified Files
+- `src/home_agent/mcp/registry.py` — Wrap FastMCPToolset in GuardedToolset
+- `src/home_agent/agent.py` — Register confirm_request tool, update create_agent()
+- `src/home_agent/bot.py` — Set deps on GuardedToolset before each agent.run() call
+- `src/home_agent/main.py` — No changes expected, but verify MCP initialization
+- `src/home_agent/prompts.py` — Simplify system prompt
+- `pyproject.toml` — Verify import-linter contracts (no changes expected)
+- `tests/test_agent.py` — Test create_agent() with GuardedToolset, confirm_request registration
+- `tests/test_integration.py` — End-to-end flows with guards
+- `tests/test_mcp_registry.py` — Test registry returns GuardedToolsets
+
+---
+
+## Step-by-Step Implementation
+
+### 1. Update MCPRegistry to wrap toolsets
+
+**File:** `src/home_agent/mcp/registry.py`
+
+Modify `get_toolsets()` to wrap each FastMCPToolset in a GuardedToolset:
+
+```python
+from home_agent.mcp.guarded_toolset import GuardedToolset
+
+class MCPRegistry:
+    # ... existing code ...
+    
+    async def get_toolsets(self) -> list[GuardedToolset]:
+        """Get MCP toolsets wrapped in guard middleware.
+        
+        Returns:
+            List of GuardedToolset instances.
+        """
+        toolsets = []
+        logger = logging.getLogger(__name__)
+        
+        for server_name, config in self.server_configs.items():
+            try:
+                # Create the real FastMCPToolset (existing code)
+                inner_toolset = await self._create_toolset(server_name, config)
+                
+                # Wrap it in GuardedToolset
+                guarded = GuardedToolset(inner_toolset)
+                toolsets.append(guarded)
+                
+                logger.debug(
+                    f"Wrapped MCP toolset in GuardedToolset",
+                    extra={"server": server_name}
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to create toolset for {server_name}",
+                    extra={"error": str(e)}
+                )
+                raise
+        
+        return toolsets
+    
+    async def _create_toolset(self, server_name: str, config: dict) -> FastMCPToolset:
+        """Create a raw FastMCPToolset (existing implementation)."""
+        # Existing code to create FastMCPToolset
+        # This is unchanged — we just wrap the result in GuardedToolset above
+        pass
+```
+
+**Design notes:**
+- `get_toolsets()` now returns `list[GuardedToolset]` instead of `list[FastMCPToolset]`
+- Each inner `FastMCPToolset` is wrapped transparently
+- Logging at DEBUG level when wrapping
+- No changes to the MCP server lifecycle (connect, disconnect) — those still happen at the inner toolset level
+
+---
+
+### 2. Update create_agent() to accept GuardedToolsets and register confirm_request
+
+**File:** `src/home_agent/agent.py`
+
+Modify the `create_agent()` function to:
+- Accept `list[GuardedToolset]` (instead of `list[FastMCPToolset]`)
+- Register the `confirm_request` tool
+- Update AgentDeps to include `guarded_toolsets`
+
+```python
+from home_agent.tools.profile_tools import confirm_request  # Add import
+from home_agent.mcp.guarded_toolset import GuardedToolset  # Add import
+
+def create_agent(
+    config: AppConfig,
+    toolsets: list[GuardedToolset] | None = None,
+) -> Agent:
+    """Create the PydanticAI agent with toolsets and tools.
+    
+    Args:
+        config: Application configuration.
+        toolsets: List of GuardedToolset-wrapped MCP toolsets. If None, no MCP tools.
+    
+    Returns:
+        Configured Agent instance.
+    """
+    if toolsets is None:
+        toolsets = []
+    
+    # Create agent with GuardedToolsets (now guardrailed)
+    agent = Agent(
+        model=config.openrouter_model,
+        deps_type=AgentDeps,
+        system_prompt=SYSTEM_PROMPT,
+        toolsets=toolsets,  # Accepts list[GuardedToolset] transparently
+    )
+    
+    # Register custom tools (profile tools + confirm_request)
+    @agent.tool
+    async def update_user_note(ctx: RunContext[AgentDeps], note: str) -> str:
+        """Existing implementation."""
+        # ... existing code ...
+    
+    @agent.tool
+    async def set_movie_quality(ctx: RunContext[AgentDeps], quality: str) -> str:
+        """Existing implementation."""
+        # ... existing code ...
+    
+    @agent.tool
+    async def set_series_quality(ctx: RunContext[AgentDeps], quality: str) -> str:
+        """Existing implementation."""
+        # ... existing code ...
+    
+    @agent.tool
+    async def set_reply_language(ctx: RunContext[AgentDeps], language: str) -> str:
+        """Existing implementation."""
+        # ... existing code ...
+    
+    # NEW: Register confirm_request tool
+    @agent.tool
+    async def confirm_request(
+        ctx: RunContext[AgentDeps],
+        mediaId: int,
+        mediaType: str,
+    ) -> str:
+        """Confirm that the user approves the media request.
+        
+        Call this after the user says yes to your confirmation prompt.
+        In Phase 4, this will be triggered by an inline keyboard button press.
+        
+        Args:
+            ctx: Runtime context with dependencies.
+            mediaId: TMDB ID of the media being requested.
+            mediaType: "movie" or "tv".
+        
+        Returns:
+            Confirmation string.
+        """
+        if not ctx.deps.guarded_toolsets:
+            return "ERROR: No guarded toolset available. Cannot confirm."
+        
+        # Set confirmed flag on all guarded toolsets
+        for toolset in ctx.deps.guarded_toolsets:
+            toolset.set_confirmed(mediaId, mediaType)
+        
+        return f"Confirmed: {mediaType.upper()} (ID: {mediaId}). Proceeding with request."
+    
+    # Update dynamic system prompt injection (existing code)
+    @agent.system_prompt(dynamic=True)
+    async def inject_context(ctx: RunContext[AgentDeps]) -> str:
+        """Inject user profile and quality settings into system prompt."""
+        # ... existing code ...
+    
+    logger = logging.getLogger(__name__)
+    logger.debug(
+        "Agent created with GuardedToolsets",
+        extra={"num_toolsets": len(toolsets), "has_confirm_request": True}
+    )
+    
+    return agent
+```
+
+**Design notes:**
+- Type signature now explicitly accepts `list[GuardedToolset]`
+- `confirm_request` is registered as an `@agent.tool` (PydanticAI will see it in the tool list)
+- No changes to existing tool registrations
+- Logging confirms the agent is created with guardrails
+
+---
+
+### 3. Update bot.py to set deps on GuardedToolset before each agent.run()
+
+**File:** `src/home_agent/bot.py`
+
+Modify the message handler to inject deps into the guarded toolsets:
+
+```python
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle incoming Telegram messages.
+    
+    Args:
+        update: Telegram update.
+        context: Telegram context.
+    """
+    user = update.effective_user
+    message = update.effective_message
+    
+    if not user or not message or not message.text:
+        return
+    
+    # Whitelist check (existing code)
+    if user.id not in config.allowed_telegram_ids:
+        await message.reply_text("You are not authorized.")
+        return
+    
+    logger = logging.getLogger(__name__)
+    
+    # Fetch user profile and build deps (existing code)
+    user_profile = await profile_manager.get(user.id)
+    
+    agent_deps = AgentDeps(
+        config=config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=user_profile,
+        guarded_toolsets=guarded_toolsets,  # NEW: Pass the toolsets to deps
+    )
+    
+    # NEW: Set deps on each GuardedToolset before agent.run()
+    for toolset in guarded_toolsets:
+        toolset.deps = agent_deps
+        logger.debug(
+            "Set deps on GuardedToolset",
+            extra={"user_id": user.id}
+        )
+    
+    # Run agent (existing code)
+    typing_on = await message.chat.send_action(ChatAction.TYPING)
+    
+    try:
+        result = await agent.run(
+            message.text,
+            deps=agent_deps,
+            # context_window=... if applicable
+        )
+        
+        await message.reply_text(result.output)
+    except Exception as e:
+        logger.error(
+            "Agent failed",
+            extra={"user_id": user.id, "error": str(e)}
+        )
+        await message.reply_text("An error occurred. Please try again.")
+    finally:
+        await typing_on  # Turn off typing indicator
+```
+
+**Design notes:**
+- `AgentDeps` now includes `guarded_toolsets` list
+- Before each `agent.run()`, we set the `deps` reference on each guarded toolset
+- This allows the guard middleware to read the user's profile at tool-call time
+- Logging at DEBUG level when setting deps
+- No changes to the actual agent.run() call or error handling
+
+---
+
+### 4. Simplify the System Prompt
+
+**File:** `src/home_agent/prompts.py`
+
+Simplify by removing redundant hard-enforcement language and noting that confirm_request exists:
+
+```python
+SYSTEM_PROMPT = (
+    "You are a helpful home server assistant. "
+    "You help the user manage their home server services including media, monitoring, and more. "
+    "Always be concise and friendly. "
+    "You use Seerr (Overseerr) for media requests — never refer to it as Jellyseerr or any other name.\n\n"
+    "## Media Requests\n"
+    "When the user asks to download, add, or request a movie or TV series:\n"
+    "1. SEARCH FIRST: Always call search_media before requesting. "
+    "Pass the title as the 'query' argument. Never guess a media ID.\n"
+    "2. DISAMBIGUATE: When search returns results:\n"
+    "   - If there is only ONE clear match (same title, year, and type as requested): "
+    "skip straight to step 3 (QUALITY).\n"
+    "   - If there are MULTIPLE results: present them as a numbered list. "
+    "Include title, year, type (movie/series), and ONE distinguishing detail "
+    "(director, lead actor, or brief description). Keep it concise.\n"
+    "   - NEVER expose TMDB IDs, media IDs, or any technical identifiers to the user.\n"
+    "   - Use natural language, not database terms.\n"
+    "   Example (multiple results):\n"
+    "     'I found a few options:\n"
+    "     1. Troy (2004) — epic war film with Brad Pitt\n"
+    "     2. Troy: Fall of a City (2018) — TV mini-series\n"
+    "     Which one would you like?'\n"
+    "   - If the user says 'the first one', 'number 2', or similar: accept it and proceed.\n"
+    "   - If the user changes their mind after picking: restart from search.\n"
+    "   - For sequels and franchises: always ask which one unless the user was specific "
+    "(e.g. 'The Matrix Reloaded' is specific; 'The Matrix' is ambiguous if there are multiple entries).\n"
+    # REMOVED: "3. QUALITY: Before calling request_media, you MUST check the user's quality preference..."
+    # REASON: This is now enforced by GuardedToolset.call_tool() — if quality is not set,
+    # request_media will return an error string. The model will see the error and respond accordingly.
+    "3. REQUEST: When you have a single confirmed title and quality, call request_media with:\n"
+    "   - mediaType: 'movie' or 'tv'\n"
+    "   - mediaId: TMDB ID from search results\n"
+    "   - is4k: true if quality is '4k', false if '1080p'\n"
+    "   - seasons: (for TV) 'all' or a list like [1, 2, 3]\n"
+    # ADDED: Note about confirmation
+    "4. CONFIRM: If the system asks you to confirm before requesting, call confirm_request "
+    "with the mediaId and mediaType after the user approves.\n"
+    "\n"
+    "## Language\n"
+    "Always reply in the language specified in your context (reply_language). "
+    "If the user asks you to switch language, call set_reply_language with the new language "
+    "name (e.g. 'Dutch', 'French') and switch immediately in your next reply.\n"
+    "\n"
+    "## Tool Usage\n"
+    "Available tools: search_media, request_media, manage_media_requests, get_media_details, "
+    "set_movie_quality, set_series_quality, set_reply_language, confirm_request, update_user_note.\n"
+    "\n"
+    "search_media: always pass the title as the 'query' argument (a plain string). "
+    "Never call search_media without a 'query' argument.\n"
+    "\n"
+    "request_media: requires 'mediaType' ('movie' or 'tv') and 'mediaId' (TMDB ID from search results). "
+    "For TV series, also pass 'seasons': either 'all' or a list like [1, 2, 3]. "
+    "Always ask the user which seasons they want before requesting a series.\n"
+    "\n"
+    "Quality: when the user's preference is '4k', pass is4k=true to request_media. "
+    "When '1080p', pass is4k=false. "
+    "If a 4K request fails or content is unavailable in 4K, offer to retry with is4k=false.\n"
+    "\n"
+    "## Preferences\n"
+    "If the user expresses preferences, habits, or personal details worth remembering, "
+    "call update_user_note to record them for future conversations."
+)
+```
+
+**Changes made:**
+- REMOVED redundant "MUST check quality preference" language — this is now a hard gate in code
+- REMOVED "NEVER call request_media when quality not set" — gates enforce this
+- ADDED note about `confirm_request` tool and how to use it
+- ADDED `confirm_request` to the tool list
+- SIMPLIFIED numbering (now 4 steps instead of the confusing 1-3 with embedded guards)
+- Kept happy-path guidance (search first, disambiguate, then request)
+- Kept tone guidance (concise, friendly, natural language)
+
+**Rationale:**
+- Prompts are suggestions. Enforcement is now in code via GuardedToolset.
+- The system prompt focuses on happy-path guidance and tone, not on gate logic.
+- This makes the prompt much more readable and easier to maintain.
+
+---
+
+### 5. Verify import-linter contracts
+
+**File:** `pyproject.toml`
+
+No changes needed. Existing contracts already cover:
+- Layer 2: "tools, mcp and models do not import agent or bot"
+- This ensures GuardedToolset (in mcp) and confirm_request (in tools) don't create circular dependencies
+
+Run lint-imports to verify:
+
+```bash
+python -m pylint --load-plugins=import_linter pyproject.toml
+```
+
+---
+
+### 6. Write Integration Tests
+
+**File:** `tests/test_integration.py`
+
+Add end-to-end flows that exercise the guards:
+
+```python
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from pydantic_ai.models.test import TestModel
+
+from home_agent.agent import create_agent, AgentDeps
+from home_agent.profile import UserProfile, MediaPreferences
+from home_agent.mcp.guarded_toolset import GuardedToolset
+
+
+@pytest.fixture
+def guarded_toolset_mock():
+    """Mock GuardedToolset with call_tool that tracks calls."""
+    toolset = MagicMock(spec=GuardedToolset)
+    toolset.call_tool = AsyncMock()
+    toolset.deps = None
+    return toolset
+
+
+@pytest.fixture
+def agent_with_guards(guarded_toolset_mock):
+    """Create agent with mocked GuardedToolset."""
+    config = MagicMock()
+    config.openrouter_model = "openrouter:free-model"
+    
+    agent = create_agent(config, toolsets=[guarded_toolset_mock])
+    return agent, guarded_toolset_mock
+
+
+@pytest.mark.asyncio
+async def test_agent_flow_new_user_no_quality(agent_with_guards):
+    """New user requests movie with no quality set → guard blocks → agent asks for quality."""
+    agent, toolset_mock = agent_with_guards
+    
+    # Mock the guard blocking the request
+    toolset_mock.call_tool.side_effect = [
+        # First call: search_media succeeds
+        '{"results": [{"id": 123, "title": "Inception", "year": 2010, "type": "movie"}]}',
+        # Second call: request_media is blocked by guard
+        "STOP: movie_quality not set. Ask the user: 'Do you prefer 4K or 1080p for movies?' Then call set_movie_quality with their answer.",
+    ]
+    
+    # User with no quality preference
+    user_profile = UserProfile(
+        telegram_id=123,
+        media_preferences=MediaPreferences(preferred_quality=None),
+        confirmation_mode="never",
+    )
+    
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=AsyncMock(),
+        history_manager=AsyncMock(),
+        user_profile=user_profile,
+        guarded_toolsets=[toolset_mock],
+    )
+    
+    # Use TestModel to avoid real LLM calls
+    with agent.override(model=TestModel()):
+        result = await agent.run("Request Inception", deps=deps)
+    
+    # The agent should have tried to call search_media and then request_media
+    # When request_media was blocked, the result should mention quality
+    assert "quality" in result.output.lower() or "4k" in result.output.lower() or "1080p" in result.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_flow_with_quality_no_confirmation(agent_with_guards):
+    """User with quality set and confirmation_mode='never' → request succeeds immediately."""
+    agent, toolset_mock = agent_with_guards
+    
+    toolset_mock.call_tool.side_effect = [
+        # First call: search_media succeeds
+        '{"results": [{"id": 123, "title": "Inception", "year": 2010, "type": "movie"}]}',
+        # Second call: request_media succeeds (quality is set, confirmation_mode is 'never')
+        '{"status": "requested", "message": "Added to requests"}',
+    ]
+    
+    user_profile = UserProfile(
+        telegram_id=123,
+        media_preferences=MediaPreferences(preferred_quality="4k"),
+        confirmation_mode="never",
+    )
+    
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=AsyncMock(),
+        history_manager=AsyncMock(),
+        user_profile=user_profile,
+        guarded_toolsets=[toolset_mock],
+    )
+    
+    with agent.override(model=TestModel()):
+        result = await agent.run("Request Inception", deps=deps)
+    
+    # request_media should have been called (not blocked)
+    assert toolset_mock.call_tool.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_agent_flow_with_confirmation_mode_always(agent_with_guards):
+    """User with confirmation_mode='always' → request blocked → agent shows confirmation prompt."""
+    agent, toolset_mock = agent_with_guards
+    
+    toolset_mock.call_tool.side_effect = [
+        # First call: search_media succeeds
+        '{"results": [{"id": 123, "title": "Inception", "year": 2010, "type": "movie"}]}',
+        # Second call: request_media blocked by confirmation gate
+        "STOP: Confirmation required. Show the user exactly what you're about to request (title, year, quality) and call confirm_request with mediaId and mediaType after they approve.",
+    ]
+    
+    user_profile = UserProfile(
+        telegram_id=123,
+        media_preferences=MediaPreferences(preferred_quality="4k"),
+        confirmation_mode="always",
+    )
+    
+    deps = AgentDeps(
+        config=MagicMock(),
+        profile_manager=AsyncMock(),
+        history_manager=AsyncMock(),
+        user_profile=user_profile,
+        guarded_toolsets=[toolset_mock],
+    )
+    
+    with agent.override(model=TestModel()):
+        result = await agent.run("Request Inception", deps=deps)
+    
+    # The agent should mention confirmation
+    assert "confirm" in result.output.lower() or "confirm_request" in result.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_tool_registered(agent_with_guards):
+    """confirm_request tool is registered on the agent."""
+    agent, _ = agent_with_guards
+    
+    # Get the registered tools
+    # This depends on how PydanticAI exposes tools — may need to adjust
+    # For now, just verify the agent was created
+    assert agent is not None
+```
+
+---
+
+### 7. Update test_agent.py
+
+**File:** `tests/test_agent.py`
+
+Add tests for create_agent() with GuardedToolsets:
+
+```python
+@pytest.mark.asyncio
+async def test_create_agent_with_guarded_toolsets():
+    """create_agent accepts and registers GuardedToolset instances."""
+    config = MagicMock()
+    config.openrouter_model = "openrouter:free-model"
+    
+    guarded_toolset = MagicMock(spec=GuardedToolset)
+    guarded_toolset.call_tool = AsyncMock(return_value="tool result")
+    
+    agent = create_agent(config, toolsets=[guarded_toolset])
+    
+    assert agent is not None
+    # Verify the agent has the toolset
+    # (This may require inspecting agent._toolsets or similar depending on PydanticAI API)
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_tool_callable():
+    """confirm_request tool can be called by the agent."""
+    config = MagicMock()
+    agent = create_agent(config)
+    
+    guarded_toolset = MagicMock(spec=GuardedToolset)
+    guarded_toolset.set_confirmed = MagicMock()
+    
+    deps = AgentDeps(
+        config=config,
+        profile_manager=AsyncMock(),
+        history_manager=AsyncMock(),
+        user_profile=MagicMock(),
+        guarded_toolsets=[guarded_toolset],
+    )
+    
+    ctx = RunContext(deps=deps, model=MagicMock(), messages=[])
+    
+    # Call confirm_request directly
+    from home_agent.agent import confirm_request
+    result = await confirm_request(ctx, mediaId=123, mediaType="movie")
+    
+    assert "Confirmed" in result
+    guarded_toolset.set_confirmed.assert_called_once_with(123, "movie")
+```
+
+---
+
+### 8. Update test_mcp_registry.py
+
+**File:** `tests/test_mcp_registry.py`
+
+Add tests for registry wrapping:
+
+```python
+@pytest.mark.asyncio
+async def test_registry_returns_guarded_toolsets():
+    """MCPRegistry.get_toolsets() returns GuardedToolset wrappers."""
+    registry = MCPRegistry(config=MagicMock())
+    
+    # Mock the _create_toolset method to return a fake FastMCPToolset
+    async def mock_create_toolset(name, config):
+        return MagicMock(spec=FastMCPToolset)
+    
+    registry._create_toolset = mock_create_toolset
+    
+    toolsets = await registry.get_toolsets()
+    
+    assert all(isinstance(ts, GuardedToolset) for ts in toolsets)
+
+
+@pytest.mark.asyncio
+async def test_registry_logs_when_wrapping():
+    """MCPRegistry logs when wrapping toolsets."""
+    registry = MCPRegistry(config=MagicMock())
+    
+    async def mock_create_toolset(name, config):
+        return MagicMock(spec=FastMCPToolset)
+    
+    registry._create_toolset = mock_create_toolset
+    
+    import logging
+    with patch.object(logging, 'getLogger') as mock_logger:
+        toolsets = await registry.get_toolsets()
+        # Verify logging was called
+        # (Implementation depends on how logging is structured)
+```
+
+---
+
+## Logging Output Examples
+
+During normal operation:
+```
+DEBUG: Set deps on GuardedToolset; user_id=123
+DEBUG: Wrapped MCP toolset in GuardedToolset; server=seerr
+DEBUG: Agent created with GuardedToolsets; num_toolsets=1 has_confirm_request=True
+```
+
+When a guard blocks:
+```
+DEBUG: Set deps on GuardedToolset; user_id=123
+WARNING: request_media blocked by quality gate; reason=movie_quality_not_set message="STOP: movie_quality not set..."
+```
+
+When confirm_request is called:
+```
+INFO: confirm_request called; mediaId=123 mediaType=movie
+```
+
+---
+
+## Import-Linter Verification
+
+Run the following before considering this step complete:
+
+```bash
+python -m pylint --load-plugins=import_linter pyproject.toml
+```
+
+Expected output: All contracts pass, no violations.
+
+---
+
+## Success Criteria
+
+- `create_agent()` accepts `list[GuardedToolset]` transparently
+- `confirm_request` tool is registered and callable
+- `bot.py` sets `deps` on GuardedToolsets before each `agent.run()`
+- System prompt simplified: removed hard-enforcement language
+- All integration tests pass
+- All unit tests pass
+- `lint-imports` passes with no contract violations
+- Logging shows expected DEBUG, WARNING, INFO messages
+- `verify.sh` passes: `ty`, `lint-imports`, `pytest`

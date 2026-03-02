@@ -115,3 +115,35 @@ async def set_confirmation_mode(
     if mode == "never":
         return "Got it! I'll request media immediately without asking for confirmation."
     return "Got it! I'll always confirm before requesting media."
+
+
+async def confirm_request(
+    ctx: RunContext[Any],
+    mediaId: int,  # noqa: N803
+    mediaType: str,  # noqa: N803
+) -> str:
+    """Confirm that the user approves the media request.
+
+    Call this after the user says yes to your confirmation prompt.
+    In Phase 4, this will be triggered by an inline keyboard button press.
+
+    Args:
+        ctx: Runtime context with dependencies.
+        mediaId: TMDB ID of the media being requested.
+        mediaType: "movie" or "tv".
+
+    Returns:
+        Confirmation string.
+    """
+    guarded_toolsets = getattr(ctx.deps, "guarded_toolsets", [])
+    if not guarded_toolsets:
+        return "ERROR: No guarded toolset available. Cannot confirm."
+
+    for toolset in guarded_toolsets:
+        toolset.set_confirmed(mediaId, mediaType)
+
+    logger.info(
+        "confirm_request called",
+        extra={"mediaId": mediaId, "mediaType": mediaType},
+    )
+    return f"Confirmed: {mediaType.upper()} (ID: {mediaId}). Proceeding with request."

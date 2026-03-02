@@ -1,0 +1,514 @@
+---
+step: 3.2
+title: GuardedToolset — MCP Tool Call Middleware
+goal: Create a GuardedToolset wrapper that intercepts MCP tool calls and enforces hard gates (quality must be set, confirmation required) before forwarding to the real MCP toolset. Add a confirm_request agent tool that signals user approval.
+
+approach: |
+  Option B from docs/LLM/other/tool_control.md: subclass/wrap the FastMCPToolset
+  to intercept all tool calls at the dispatch level. Gate logic is centralised in
+  one place — when new MCP servers are added (PDF, file converter, Glances), their
+  tools pass through untouched unless explicitly gated.
+
+  Key insight: prompts are suggestions, tool return values are facts. Gates return
+  plain English error strings that the model must respond to as instructions.
+
+---
+
+## Key Files
+
+### New Files
+- `src/home_agent/mcp/guarded_toolset.py` — The GuardedToolset class wrapping FastMCPToolset
+- `tests/test_guarded_toolset.py` — Unit tests for all guard rules and pass-throughs
+
+### Modified Files
+- `src/home_agent/tools/profile_tools.py` — Add confirm_request @agent.tool
+- `tests/test_profile_tools.py` — Test confirm_request tool
+
+---
+
+## Step-by-Step Implementation
+
+### 1. Design the GuardedToolset Class
+
+**File:** `src/home_agent/mcp/guarded_toolset.py`
+
+Create a wrapper class that:
+- Takes a `FastMCPToolset` instance in `__init__`
+- Stores a reference to `AgentDeps` (will be set by bot.py before each agent.run() call)
+- Implements a `call_tool(name: str, arguments: dict)` async method that intercepts all tool calls
+- Tracks state: `confirmed` flag (bool), `called_tools` (set of tool names)
+
+```python
+class GuardedToolset:
+    def __init__(self, inner_toolset: FastMCPToolset):
+        self.inner_toolset = inner_toolset
+        self.deps: Optional[AgentDeps] = None
+        self.confirmed = False
+        self.called_tools: set[str] = set()
+    
+    async def call_tool(self, name: str, arguments: dict) -> str:
+        """Intercept tool call, apply guards, forward to real toolset."""
+        logger = logging.getLogger(__name__)
+        
+        # Guard 1: request_media quality check
+        if name == "request_media":
+            media_type = arguments.get("mediaType")
+            if media_type == "movie" and not self._has_movie_quality():
+                error_msg = "STOP: movie_quality not set. Ask the user: 'Do you prefer 4K or 1080p for movies?' Then call set_movie_quality with their answer."
+                logger.warning(
+                    "request_media blocked by quality gate",
+                    extra={"reason": "movie_quality_not_set", "message": error_msg}
+                )
+                return error_msg
+            
+            if media_type == "tv" and not self._has_series_quality():
+                error_msg = "STOP: series_quality not set. Ask the user: 'Do you prefer 4K or 1080p for series?' Then call set_series_quality with their answer."
+                logger.warning(
+                    "request_media blocked by quality gate",
+                    extra={"reason": "series_quality_not_set", "message": error_msg}
+                )
+                return error_msg
+        
+        # Guard 2: request_media confirmation check
+        if name == "request_media":
+            if self._needs_confirmation() and not self.confirmed:
+                error_msg = "STOP: Confirmation required. Show the user exactly what you're about to request (title, year, quality) and call confirm_request with mediaId and mediaType after they approve."
+                logger.warning(
+                    "request_media blocked by confirmation gate",
+                    extra={"reason": "confirmation_required", "message": error_msg}
+                )
+                return error_msg
+        
+        # All other tools pass through
+        logger.debug(f"Tool call allowed", extra={"tool": name})
+        result = await self.inner_toolset.call_tool(name, arguments)
+        
+        # Track successful calls and reset confirmation after request_media succeeds
+        self.called_tools.add(name)
+        if name == "request_media":
+            self.confirmed = False
+            logger.info("request_media succeeded, confirmation flag reset")
+        
+        return result
+    
+    def set_confirmed(self, media_id: int, media_type: str) -> None:
+        """Called by confirm_request tool to set the confirmation flag."""
+        self.confirmed = True
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "confirm_request called",
+            extra={"mediaId": media_id, "mediaType": media_type}
+        )
+    
+    def _has_movie_quality(self) -> bool:
+        if not self.deps:
+            return False
+        return self.deps.user_profile.media_preferences.preferred_quality is not None
+    
+    def _has_series_quality(self) -> bool:
+        if not self.deps:
+            return False
+        return self.deps.user_profile.media_preferences.preferred_quality is not None
+    
+    def _needs_confirmation(self) -> bool:
+        if not self.deps:
+            return False
+        return self.deps.user_profile.confirmation_mode == "always"
+```
+
+**Design notes:**
+- `call_tool` is async and returns a string (compatible with PydanticAI toolset API)
+- Gates return plain English error strings — the model reads these as tool results and must respond
+- `confirmed` flag is set by `confirm_request` tool, reset after `request_media` succeeds
+- Quality checks read from `self.deps.user_profile.media_preferences.preferred_quality`
+- Logging at three levels: WARNING (gate blocks), DEBUG (pass-through), INFO (confirm_request)
+- `called_tools` set tracks what's been called in this turn (for future use: e.g., "must search before request")
+
+---
+
+### 2. Add confirm_request Tool to profile_tools.py
+
+**File:** `src/home_agent/tools/profile_tools.py`
+
+Add a new `@agent.tool` function that the model can call to signal user approval:
+
+```python
+@agent.tool
+async def confirm_request(
+    ctx: RunContext[AgentDeps],
+    mediaId: int,
+    mediaType: str,
+) -> str:
+    """Confirm that the user approves the media request.
+
+    Call this after the user says yes to your confirmation prompt.
+    In Phase 4, this will be triggered by an inline keyboard button press.
+
+    Args:
+        ctx: Runtime context with dependencies.
+        mediaId: TMDB ID of the media being requested.
+        mediaType: "movie" or "tv".
+
+    Returns:
+        Confirmation string.
+    """
+    if not ctx.deps.guarded_toolsets:
+        return "ERROR: No guarded toolset available. Cannot confirm."
+    
+    # Set confirmed flag on all guarded toolsets
+    for toolset in ctx.deps.guarded_toolsets:
+        toolset.set_confirmed(mediaId, mediaType)
+    
+    return f"Confirmed: {mediaType.upper()} (ID: {mediaId}). Proceeding with request."
+```
+
+**Design notes:**
+- Takes `mediaId` and `mediaType` for audit trail (prevents accidental requests for wrong media)
+- Iterates over `ctx.deps.guarded_toolsets` and sets `confirmed` on each
+- Returns a plain string confirming the action — the model sees this and knows to proceed
+- No persistence needed — confirmation is ephemeral (reset after request_media succeeds)
+
+---
+
+### 3. Update AgentDeps Dataclass
+
+**File:** `src/home_agent/agent.py`
+
+Modify the `AgentDeps` dataclass to include a reference to the guarded toolsets:
+
+```python
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class AgentDeps:
+    """Dependencies injected into the agent at runtime."""
+    config: AppConfig
+    profile_manager: ProfileManager
+    history_manager: HistoryManager
+    user_profile: UserProfile
+    guarded_toolsets: list[GuardedToolset] = field(default_factory=list)
+```
+
+This allows `confirm_request` tool to access the `GuardedToolset` instances and set the `confirmed` flag.
+
+---
+
+### 4. Write Comprehensive Unit Tests
+
+**File:** `tests/test_guarded_toolset.py`
+
+Test all guards and pass-throughs:
+
+```python
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from home_agent.mcp.guarded_toolset import GuardedToolset
+from home_agent.agent import AgentDeps
+from home_agent.profile import UserProfile, MediaPreferences
+
+
+@pytest.fixture
+def mock_inner_toolset():
+    toolset = AsyncMock()
+    toolset.call_tool = AsyncMock(return_value="tool result")
+    return toolset
+
+
+@pytest.fixture
+def guarded_toolset(mock_inner_toolset):
+    return GuardedToolset(mock_inner_toolset)
+
+
+@pytest.fixture
+def mock_deps_no_quality():
+    profile = UserProfile(
+        telegram_id=123,
+        media_preferences=MediaPreferences(preferred_quality=None),
+        confirmation_mode="never",
+    )
+    return AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        guarded_toolsets=[],
+    )
+
+
+@pytest.fixture
+def mock_deps_with_quality():
+    profile = UserProfile(
+        telegram_id=123,
+        media_preferences=MediaPreferences(preferred_quality="4k"),
+        confirmation_mode="never",
+    )
+    return AgentDeps(
+        config=MagicMock(),
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        guarded_toolsets=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_media_blocked_when_movie_quality_not_set(
+    guarded_toolset, mock_deps_no_quality
+):
+    """request_media blocked when movie_quality is None."""
+    guarded_toolset.deps = mock_deps_no_quality
+    
+    result = await guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    
+    assert "movie_quality not set" in result.lower()
+    assert "set_movie_quality" in result
+
+
+@pytest.mark.asyncio
+async def test_request_media_blocked_when_series_quality_not_set(
+    guarded_toolset, mock_deps_no_quality
+):
+    """request_media blocked when series_quality is None."""
+    guarded_toolset.deps = mock_deps_no_quality
+    
+    result = await guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "tv", "mediaId": 456, "seasons": "all"}
+    )
+    
+    assert "series_quality not set" in result.lower()
+    assert "set_series_quality" in result
+
+
+@pytest.mark.asyncio
+async def test_request_media_allowed_when_quality_set_and_no_confirmation(
+    guarded_toolset, mock_deps_with_quality, mock_inner_toolset
+):
+    """request_media allowed when quality set and confirmation_mode='never'."""
+    guarded_toolset.deps = mock_deps_with_quality
+    
+    result = await guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    
+    assert result == "tool result"
+    mock_inner_toolset.call_tool.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_request_media_blocked_when_confirmation_required_and_not_confirmed(
+    guarded_toolset, mock_deps_with_quality
+):
+    """request_media blocked when confirmation_mode='always' and not confirmed."""
+    deps = mock_deps_with_quality
+    deps.user_profile.confirmation_mode = "always"
+    guarded_toolset.deps = deps
+    
+    result = await guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    
+    assert "confirmation required" in result.lower()
+    assert "confirm_request" in result
+
+
+@pytest.mark.asyncio
+async def test_request_media_allowed_when_confirmation_required_and_confirmed(
+    guarded_toolset, mock_deps_with_quality, mock_inner_toolset
+):
+    """request_media allowed when confirmation_mode='always' and confirmed."""
+    deps = mock_deps_with_quality
+    deps.user_profile.confirmation_mode = "always"
+    guarded_toolset.deps = deps
+    guarded_toolset.confirmed = True
+    
+    result = await guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    
+    assert result == "tool result"
+    mock_inner_toolset.call_tool.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_search_media_passes_through_without_gate(
+    guarded_toolset, mock_deps_no_quality, mock_inner_toolset
+):
+    """search_media passes through without any guard."""
+    guarded_toolset.deps = mock_deps_no_quality
+    
+    result = await guarded_toolset.call_tool(
+        "search_media",
+        {"query": "Inception"}
+    )
+    
+    assert result == "tool result"
+    mock_inner_toolset.call_tool.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_passes_through(
+    guarded_toolset, mock_deps_no_quality, mock_inner_toolset
+):
+    """Unknown/future tools pass through without any gate."""
+    guarded_toolset.deps = mock_deps_no_quality
+    
+    result = await guarded_toolset.call_tool(
+        "pdf_extract",
+        {"file_id": "abc123"}
+    )
+    
+    assert result == "tool result"
+    mock_inner_toolset.call_tool.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_flag_resets_after_request_media(
+    guarded_toolset, mock_deps_with_quality, mock_inner_toolset
+):
+    """Confirmed flag resets after successful request_media."""
+    deps = mock_deps_with_quality
+    deps.user_profile.confirmation_mode = "always"
+    guarded_toolset.deps = deps
+    guarded_toolset.confirmed = True
+    
+    await guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    )
+    
+    assert guarded_toolset.confirmed is False
+
+
+@pytest.mark.asyncio
+async def test_set_confirmed_sets_flag(guarded_toolset, caplog):
+    """set_confirmed() sets the confirmed flag and logs."""
+    guarded_toolset.set_confirmed(mediaId=123, mediaType="movie")
+    
+    assert guarded_toolset.confirmed is True
+    assert "confirm_request called" in caplog.text
+    assert "mediaId" in caplog.text
+
+
+def test_guard_block_logs_warning(guarded_toolset, mock_deps_no_quality, caplog):
+    """Guard block emits WARNING log."""
+    guarded_toolset.deps = mock_deps_no_quality
+    
+    # This would be async in real code, but we're checking log output
+    # In real test, wrap in asyncio.run() or use @pytest.mark.asyncio
+    import asyncio
+    asyncio.run(guarded_toolset.call_tool(
+        "request_media",
+        {"mediaType": "movie", "mediaId": 123, "is4k": True}
+    ))
+    
+    assert "request_media blocked by quality gate" in caplog.text
+
+
+def test_pass_through_logs_debug(guarded_toolset, mock_deps_with_quality, caplog):
+    """Pass-through emits DEBUG log."""
+    guarded_toolset.deps = mock_deps_with_quality
+    
+    import asyncio
+    import logging
+    caplog.set_level(logging.DEBUG)
+    
+    asyncio.run(guarded_toolset.call_tool(
+        "search_media",
+        {"query": "Inception"}
+    ))
+    
+    assert "Tool call allowed" in caplog.text
+```
+
+---
+
+### 5. Update profile_tools.py Tests
+
+**File:** `tests/test_profile_tools.py`
+
+Add tests for the new `confirm_request` tool:
+
+```python
+@pytest.mark.asyncio
+async def test_confirm_request_sets_flag(mock_deps):
+    """confirm_request sets confirmed flag on guarded toolsets."""
+    guarded_toolset = MagicMock()
+    guarded_toolset.set_confirmed = MagicMock()
+    mock_deps.guarded_toolsets = [guarded_toolset]
+    
+    ctx = RunContext(deps=mock_deps, model=MagicMock(), messages=[])
+    result = await confirm_request(ctx, mediaId=123, mediaType="movie")
+    
+    assert "Confirmed" in result
+    guarded_toolset.set_confirmed.assert_called_once_with(123, "movie")
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_logs_info(mock_deps, caplog):
+    """confirm_request logs at INFO level."""
+    guarded_toolset = MagicMock()
+    guarded_toolset.set_confirmed = MagicMock()
+    mock_deps.guarded_toolsets = [guarded_toolset]
+    
+    ctx = RunContext(deps=mock_deps, model=MagicMock(), messages=[])
+    
+    import logging
+    caplog.set_level(logging.INFO)
+    
+    await confirm_request(ctx, mediaId=456, mediaType="tv")
+    
+    assert "confirm_request called" in caplog.text
+    assert "456" in caplog.text or "mediaId" in caplog.text
+```
+
+---
+
+## Logging Output Examples
+
+When everything works:
+```
+DEBUG: Tool call allowed; tool=search_media
+INFO: confirm_request called; mediaId=123 mediaType=movie
+DEBUG: Tool call allowed; tool=request_media
+INFO: request_media succeeded, confirmation flag reset
+```
+
+When guard blocks:
+```
+WARNING: request_media blocked by quality gate; reason=movie_quality_not_set message="STOP: movie_quality not set..."
+INFO: confirm_request called; mediaId=123 mediaType=movie
+DEBUG: Tool call allowed; tool=request_media
+```
+
+---
+
+## Import-Linter Compliance
+
+- `src/home_agent/mcp/guarded_toolset.py` is in the `mcp` layer
+  - May import from: `home_agent.profile`, `home_agent.config`
+  - May NOT import from: `home_agent.agent`, `home_agent.bot`, `home_agent.main`
+  - This is already covered by the existing Layer 2 contract in `pyproject.toml`
+
+- `src/home_agent/tools/profile_tools.py` is in the `tools` layer
+  - May import from: `home_agent.profile`, `home_agent.config`, `home_agent.mcp`
+  - May NOT import from: `home_agent.agent`, `home_agent.bot`, `home_agent.main`
+  - This is already covered by the existing Layer 2 contract in `pyproject.toml`
+
+**No changes to pyproject.toml needed.**
+
+---
+
+## Success Criteria
+
+- All unit tests in `test_guarded_toolset.py` pass
+- All new tests in `test_profile_tools.py` pass
+- Logging output shows expected levels and messages
+- `verify.sh` passes: `ty`, `lint-imports`, `pytest`

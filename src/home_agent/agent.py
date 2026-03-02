@@ -6,8 +6,8 @@ Adheres to home-agent coding standards: type hints, Google-style docstrings, asy
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai import Agent, RunContext
 
@@ -17,11 +17,15 @@ from home_agent.mcp.registry import MCPRegistry
 from home_agent.profile import ProfileManager, UserProfile
 from home_agent.prompts import SYSTEM_PROMPT
 from home_agent.tools.profile_tools import (
+    confirm_request,
     set_confirmation_mode,
     set_movie_quality,
     set_reply_language,
     set_series_quality,
 )
+
+if TYPE_CHECKING:
+    from home_agent.mcp.guarded_toolset import GuardedToolset
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +39,15 @@ class AgentDeps:
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history.
         user_profile: The current user's profile.
+        guarded_toolsets: GuardedToolset instances wrapping MCP toolsets.
+            The confirm_request tool sets the confirmed flag on each of these.
     """
 
     config: AppConfig
     profile_manager: ProfileManager
     history_manager: HistoryManager
     user_profile: UserProfile
+    guarded_toolsets: list[GuardedToolset] = field(default_factory=list)
 
 
 def create_agent(
@@ -157,6 +164,7 @@ def create_agent(
     agent_instance.tool(set_series_quality)
     agent_instance.tool(set_reply_language)
     agent_instance.tool(set_confirmation_mode)
+    agent_instance.tool(confirm_request)
 
     return agent_instance
 

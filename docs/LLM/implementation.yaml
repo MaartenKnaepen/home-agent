@@ -578,6 +578,157 @@ phases:
       - verify.sh passes: ty + lint-imports + pytest all green
 
       '
+  - files:
+    - src/home_agent/mcp/guarded_toolset.py
+    - src/home_agent/tools/profile_tools.py
+    - tests/test_guarded_toolset.py
+    - tests/test_profile_tools.py
+    goal: Create a GuardedToolset wrapper that intercepts MCP tool calls and enforces
+      hard gates (quality must be set, confirmation required) before forwarding to
+      the real MCP toolset. All non-gated tools pass through transparently. Add a
+      confirm_request agent tool that signals user approval.
+    id: '3.2'
+    name: GuardedToolset — MCP Tool Call Middleware
+    detailed_plan: docs/LLM/plans/step-3.2.rovo-plan.yaml
+    notes: 'Option B from docs/LLM/other/tool_control.md. The GuardedToolset wraps
+      FastMCPToolset and overrides tool call dispatch. Guard logic is centralised in
+      one place — when new MCP servers are added (PDF, file converter, Glances), their
+      tools pass through untouched unless explicitly gated. The key insight: prompts
+      are suggestions, tool return values are facts. Gates return plain English error
+      strings that the model must respond to. AgentDeps must be accessible from the
+      toolset at call time — achieved by storing a reference to the current deps on
+      the toolset before each agent.run() call. A confirm_request @agent.tool in
+      profile_tools.py sets the confirmed flag on the GuardedToolset — in Phase 4
+      this will be triggered by an inline keyboard button press instead of a text
+      "yes". All guard decisions and pass-throughs must be logged at DEBUG/INFO level
+      so behaviour can be verified in production logs.'
+    scope: "- GuardedToolset class wrapping a FastMCPToolset instance\n- Intercepts\
+      \ call_tool() and applies guard rules before forwarding\n- Guard: request_media\
+      \ blocked when movie_quality is None (for movies) or series_quality is None (for\
+      \ series) — returns error string instructing model to ask user and call set_movie_quality\
+      \ / set_series_quality first\n- Guard: request_media blocked when confirmation_mode\
+      \ is 'always' and no confirmation has been recorded for this request — returns\
+      \ error string telling model to confirm with user first, then call confirm_request\n\
+      - confirm_request @agent.tool in profile_tools.py — sets a confirmed flag on\
+      \ the GuardedToolset instance accessible via ctx.deps. Takes mediaId and mediaType\
+      \ as arguments for audit trail. In Phase 4 this will be wired to an inline\
+      \ keyboard button.\n- All other MCP tool calls (search_media, get_media_details,\
+      \ manage_media_requests, and any future tools from PDF/file/Glances servers)\
+      \ pass through unmodified\n- State tracking: track which tools have been called\
+      \ in current conversation turn (called_tools set)\n- Confirmation tracking: confirmed\
+      \ flag set by confirm_request tool, reset after successful request_media call\n\
+      - Returns ToolResult-compatible responses so PydanticAI processes them correctly\n\
+      - Logging: every guard block logs at WARNING level (tool name, reason, user-facing\
+      \ message). Every pass-through logs at DEBUG level (tool name, 'allowed'). confirm_request\
+      \ logs at INFO level (mediaId, mediaType).\n- Import-linter: mcp layer does not\
+      \ import agent, bot, or main. profile_tools (tools layer) does not import agent,\
+      \ bot, or main. GuardedToolset is in mcp layer — it may import from profile\
+      \ (for UserProfile type) but not from tools.\n"
+    status: pending
+    test: "- test_guarded_toolset.py — request_media blocked when movie_quality is\
+      \ None, returns error string mentioning set_movie_quality\n- test_guarded_toolset.py\
+      \ — request_media blocked when series_quality is None for TV requests, returns\
+      \ error string mentioning set_series_quality\n- test_guarded_toolset.py — request_media\
+      \ allowed when movie_quality is set (e.g. '4k') and confirmation_mode is 'never'\n\
+      - test_guarded_toolset.py — request_media blocked when confirmation_mode is 'always'\
+      \ and not yet confirmed, returns confirmation prompt mentioning confirm_request\n\
+      - test_guarded_toolset.py — request_media allowed when confirmation_mode is 'always'\
+      \ and confirmed flag is set\n- test_guarded_toolset.py — confirmed flag resets\
+      \ after successful request_media\n- test_guarded_toolset.py — search_media passes\
+      \ through without any gate\n- test_guarded_toolset.py — unknown/future tools\
+      \ pass through without any gate\n- test_guarded_toolset.py — is4k argument set\
+      \ correctly based on quality preference ('4k' → true, '1080p' → false)\n- test_guarded_toolset.py\
+      \ — guard block emits WARNING log with tool name and reason\n- test_guarded_toolset.py\
+      \ — pass-through emits DEBUG log\n- test_profile_tools.py — confirm_request sets\
+      \ confirmed flag and returns confirmation string\n- test_profile_tools.py — confirm_request\
+      \ logs mediaId and mediaType at INFO level\n"
+  - files:
+    - src/home_agent/mcp/registry.py
+    - src/home_agent/agent.py
+    - src/home_agent/bot.py
+    - src/home_agent/main.py
+    - src/home_agent/prompts.py
+    - pyproject.toml
+    - tests/test_agent.py
+    - tests/test_integration.py
+    - tests/test_mcp_registry.py
+    goal: Wire GuardedToolset into the agent pipeline so all MCP tool calls flow through
+      the guard middleware. Update deps injection so GuardedToolset has access to the
+      current user's profile at call time. Add confirm_request tool to agent. Update
+      import-linter contracts.
+    id: '3.3'
+    name: Wire GuardedToolset into Agent Pipeline
+    detailed_plan: docs/LLM/plans/step-3.3.rovo-plan.yaml
+    notes: 'MCPRegistry.get_toolsets() should return GuardedToolset-wrapped toolsets
+      instead of raw FastMCPToolset instances. The GuardedToolset needs access to AgentDeps
+      (specifically user_profile.media_preferences and user_profile.confirmation_mode)
+      at tool-call time. This is achieved by storing a deps reference on the GuardedToolset
+      before each agent.run() call in bot.py. The create_agent() function signature
+      does not change — it still accepts toolsets, but they are now GuardedToolsets.
+      System prompt in prompts.py should be simplified: keep happy-path guidance and
+      tone but remove redundant hard-enforcement language (NEVER, STOP, MUST) for
+      gates that are now enforced in code. Add confirm_request tool registration in
+      create_agent(). Import-linter: no new contracts needed — GuardedToolset is in
+      mcp layer (already covered by Layer 2 contract). Verify existing contracts
+      still pass after all changes. All wiring and lifecycle changes must be logged
+      so the flow can be traced in production logs.'
+    scope: "- MCPRegistry wraps each FastMCPToolset in a GuardedToolset when building\
+      \ toolsets\n- bot.py sets guarded_toolset.deps = agent_deps before each agent.run()\
+      \ call, logs at DEBUG level\n- AgentDeps gets a new optional field: guarded_toolsets\
+      \ (list of GuardedToolset refs) so confirm_request tool can access the confirmed\
+      \ flag\n- create_agent() registers confirm_request tool alongside existing profile\
+      \ tools\n- create_agent() unchanged re: toolsets param — receives toolsets (now\
+      \ GuardedToolsets) transparently\n- prompts.py: simplify system prompt — remove\
+      \ redundant NEVER/STOP/MUST enforcement for quality and confirmation gates.\
+      \ Keep: search-first guidance, disambiguation logic, formatting rules, language\
+      \ instructions, tool usage docs. Add: mention confirm_request tool in the\
+      \ confirmation flow description.\n- pyproject.toml: verify import-linter contracts\
+      \ — no changes expected (mcp layer already forbidden from importing agent/bot/main)\
+      \ but run lint-imports to confirm\n- Logging: bot.py logs when setting deps on\
+      \ GuardedToolset. registry.py logs when wrapping toolsets.\n"
+    status: pending
+    test: "- test_agent.py — create_agent() works with GuardedToolset instances\n\
+      - test_agent.py — confirm_request tool is registered on the agent\n- test_integration.py\
+      \ — full flow: user requests movie with no quality set → agent gets gate error\
+      \ → asks user for quality → sets quality → requests successfully\n- test_integration.py\
+      \ — full flow: user requests movie with quality set and confirmation_mode='never'\
+      \ → request goes through immediately\n- test_integration.py — full flow: user\
+      \ requests movie with quality set and confirmation_mode='always' → agent calls\
+      \ confirm_request → then request_media succeeds\n- test_mcp_registry.py — registry\
+      \ returns GuardedToolset wrappers\n- lint-imports passes with no contract violations\n"
+  - files:
+    - tests/test_guarded_toolset.py
+    - tests/test_integration.py
+    - docs/LLM/memory.yaml
+    - docs/LLM/api.yaml
+    goal: End-to-end verification that all gates work correctly, edge cases handled,
+      and documentation updated. Verify the quality-not-set scenario specifically works
+      for new users.
+    id: '3.4'
+    name: Verify & Document Tool Guards
+    detailed_plan: docs/LLM/plans/step-3.4.rovo-plan.yaml
+    notes: 'This step focuses on edge cases and documentation. Key edge case: a brand
+      new user (movie_quality=None, series_quality=None) asks "download Inception" —
+      the agent MUST ask for quality preference before the request goes through. Also
+      covers: 4K request fails → offer 1080p fallback, user changes quality mid-conversation,
+      mixed movie+series requests in one conversation. Verify all logging output is
+      present and useful for debugging. Run verify.sh as final gate.'
+    scope: "- Edge case tests: new user with no quality set requesting a movie\n- Edge\
+      \ case tests: user changes quality preference mid-conversation\n- Edge case tests:\
+      \ 4K unavailable → fallback to 1080p\n- Edge case tests: series request with\
+      \ season selection + quality gate\n- Edge case tests: confirm_request then request_media\
+      \ in same turn\n- Edge case tests: confirm_request for wrong media (mediaId mismatch)\n\
+      - Verify logging: guard blocks appear at WARNING, pass-throughs at DEBUG,\
+      \ confirm_request at INFO\n- Update memory.yaml with Phase 3 completion state\
+      \ and tool guard decisions\n- Update api.yaml with GuardedToolset and confirm_request\
+      \ documentation\n- verify.sh passes: ty + lint-imports + pytest all green\n"
+    status: pending
+    test: "- All verify.sh checks pass\n- test_integration.py — new user flow: request\
+      \ movie → quality gate fires → user picks 4K → set_movie_quality called → request\
+      \ succeeds\n- test_integration.py — quality change mid-conversation persists\n\
+      - test_guarded_toolset.py — all edge cases covered including confirm_request\
+      \ mediaId mismatch\n- test_guarded_toolset.py — logging assertions verify correct\
+      \ log levels and messages\n- memory.yaml and api.yaml updated\n"
 - focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.
   id: 4
   name: Polish & Advanced Features

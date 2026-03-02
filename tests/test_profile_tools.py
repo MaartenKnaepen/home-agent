@@ -19,6 +19,7 @@ from home_agent.config import AppConfig
 from home_agent.history import HistoryManager
 from home_agent.profile import MediaPreferences, ProfileManager, UserProfile
 from home_agent.tools.profile_tools import (
+    confirm_request,
     set_confirmation_mode,
     set_movie_quality,
     set_reply_language,
@@ -260,3 +261,128 @@ async def test_profile_tools_registered_on_agent(
     assert "set_series_quality" in tool_names
     assert "set_reply_language" in tool_names
     assert "set_confirmation_mode" in tool_names
+    assert "confirm_request" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# confirm_request
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_sets_flag_on_guarded_toolset(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """confirm_request calls set_confirmed on every guarded toolset."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=60)
+    await profile_manager.save(profile)
+
+    guarded_toolset = MagicMock()
+    guarded_toolset.set_confirmed = MagicMock()
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[guarded_toolset],
+    )
+    ctx = MagicMock(spec=RunContext)
+    ctx.deps = deps
+
+    result = await confirm_request(ctx, mediaId=123, mediaType="movie")
+
+    assert "Confirmed" in result
+    assert "123" in result
+    assert "MOVIE" in result
+    guarded_toolset.set_confirmed.assert_called_once_with(123, "movie")
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_multiple_guarded_toolsets(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """confirm_request sets confirmed on all guarded toolsets."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=61)
+    await profile_manager.save(profile)
+
+    toolset_a = MagicMock()
+    toolset_a.set_confirmed = MagicMock()
+    toolset_b = MagicMock()
+    toolset_b.set_confirmed = MagicMock()
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[toolset_a, toolset_b],
+    )
+    ctx = MagicMock(spec=RunContext)
+    ctx.deps = deps
+
+    await confirm_request(ctx, mediaId=456, mediaType="tv")
+
+    toolset_a.set_confirmed.assert_called_once_with(456, "tv")
+    toolset_b.set_confirmed.assert_called_once_with(456, "tv")
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_no_guarded_toolsets_returns_error(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """confirm_request returns an error string when no guarded toolsets are available."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=62)
+    await profile_manager.save(profile)
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[],
+    )
+    ctx = MagicMock(spec=RunContext)
+    ctx.deps = deps
+
+    result = await confirm_request(ctx, mediaId=789, mediaType="movie")
+
+    assert "ERROR" in result
+    assert "No guarded toolset" in result
+
+
+@pytest.mark.asyncio
+async def test_confirm_request_logs_info(
+    mock_config: AppConfig, test_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """confirm_request logs at INFO level with mediaId and mediaType."""
+    import logging
+
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    profile = make_test_profile(user_id=63)
+    await profile_manager.save(profile)
+
+    guarded_toolset = MagicMock()
+    guarded_toolset.set_confirmed = MagicMock()
+
+    deps = AgentDeps(
+        config=mock_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+        guarded_toolsets=[guarded_toolset],
+    )
+    ctx = MagicMock(spec=RunContext)
+    ctx.deps = deps
+
+    with caplog.at_level(logging.INFO, logger="home_agent.tools.profile_tools"):
+        await confirm_request(ctx, mediaId=456, mediaType="tv")
+
+    assert "confirm_request called" in caplog.text
