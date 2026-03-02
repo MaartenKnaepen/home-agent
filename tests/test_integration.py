@@ -597,6 +597,53 @@ async def test_e2e_confirmation_mode_always_flow(
     mock_inner.call_tool.assert_called_once()
 
 
+async def test_bot_resets_guarded_toolset_state_per_message(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """make_message_handler resets called_tools and confirmed on GuardedToolsets each message.
+
+    GuardedToolset is a long-lived instance reused across messages.  State left
+    over from a previous turn (e.g. confirmed=True, called_tools={'search_media'})
+    must be cleared before each agent.run() call so it cannot leak into the next
+    message.
+
+    Verifies that even when the toolset starts with dirty state, both fields are
+    False/empty after handle_message processes a new message.
+    """
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    inner = MagicMock()
+    inner.id = "test-server"
+    guarded_toolset = GuardedToolset(inner)
+
+    # Simulate dirty state left over from a previous message
+    guarded_toolset.confirmed = True
+    guarded_toolset.called_tools = {"search_media"}
+
+    mock_result = MagicMock()
+    mock_result.output = "Done!"
+    mock_agent = MagicMock()
+    mock_agent.run = AsyncMock(return_value=mock_result)
+
+    handler = make_message_handler(
+        integration_config,
+        profile_manager,
+        history_manager,
+        mock_agent,
+        guarded_toolsets=[guarded_toolset],
+    )
+    update = make_update("new message", user_id=12345)
+    await handler(update, MagicMock())
+
+    # Both fields must be reset before agent.run() was called
+    assert guarded_toolset.confirmed is False
+    assert guarded_toolset.called_tools == set()
+
+
 async def test_language_switch_persists_across_messages(
     integration_config: AppConfig,
     integration_db: Path,

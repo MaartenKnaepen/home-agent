@@ -149,10 +149,19 @@ def make_message_handler(
             guarded_toolsets=_guarded_toolsets,
         )
 
-        # Inject deps into each GuardedToolset so gates can access the user profile
+        # Inject deps into each GuardedToolset so gates can access the user profile.
+        # GuardedToolset is a long-lived instance reused across messages, so we must
+        # reset per-message state (called_tools, confirmed) here to prevent leakage
+        # between turns: e.g. a leftover confirmed=True from a previous message that
+        # failed after the user said 'yes' but before request_media was called.
         for toolset in _guarded_toolsets:
             toolset.deps = deps
-            logger.debug("Set deps on GuardedToolset", extra={"user_id": user_id})
+            toolset.called_tools = set()   # reset per-message state
+            toolset.confirmed = False       # reset per-message state
+            logger.debug(
+                "Injected deps and reset GuardedToolset state",
+                extra={"user_id": user_id},
+            )
 
         try:
             result = await agent.run(text, deps=deps, message_history=message_history)
