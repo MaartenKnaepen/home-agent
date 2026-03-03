@@ -381,70 +381,56 @@ def make_callback_update(
 
 
 @pytest.mark.asyncio
-async def test_callback_confirm_sets_confirmed_on_guarded_toolset(
+async def test_callback_confirm_stores_pending_confirmation(
     mock_config: AppConfig, test_db: Path
 ) -> None:
-    """'confirm:{mediaId}:{mediaType}' callback sets confirmed=True on GuardedToolset."""
+    """'confirm:{mediaId}:{mediaType}' callback stores pending confirmation and runs agent."""
     profile_manager = ProfileManager(test_db)
     history_manager = HistoryManager(test_db)
-
-    # Real GuardedToolset (not MagicMock) — AbstractToolset protocol enforced
-    inner = MagicMock()
-    inner.id = "test-server"
-    inner.__aenter__ = AsyncMock(return_value=inner)
-    inner.__aexit__ = AsyncMock(return_value=None)
-    inner.get_tools = AsyncMock(return_value={})
-    inner.call_tool = AsyncMock(return_value="ok")
-
-    guarded = GuardedToolset(inner)
-    assert guarded.confirmed is False
 
     mock_result = MagicMock()
     mock_result.output = "Request submitted!"
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(return_value=mock_result)
 
+    pending: dict = {}
     handler = make_callback_handler(
-        mock_config, [guarded], mock_agent, profile_manager, history_manager
+        mock_config, [], mock_agent, profile_manager, history_manager,
+        pending_confirmations=pending,
     )
     update, context = make_callback_update("confirm:42:movie", user_id=123)
 
     await handler(update, context)
 
-    # GuardedToolset.set_confirmed must have been called — real flag is True
-    assert guarded.confirmed is True
+    # Agent was re-run with confirmed=True in deps
+    mock_agent.run.assert_called_once()
+    run_kwargs = mock_agent.run.call_args
+    deps_arg = run_kwargs[1].get("deps") or (run_kwargs[0][1] if len(run_kwargs[0]) > 1 else None)
+    # pending_confirmations consumed during callback re-run
+    assert 123 not in pending
     update.callback_query.answer.assert_called_once()
     update.callback_query.edit_message_text.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_callback_cancel_sets_confirmed_false(
+async def test_callback_cancel_removes_pending_confirmation(
     mock_config: AppConfig, test_db: Path
 ) -> None:
-    """'cancel' callback resets confirmed=False on GuardedToolset."""
+    """'cancel' callback removes any pending confirmation for the user."""
     profile_manager = ProfileManager(test_db)
     history_manager = HistoryManager(test_db)
 
-    inner = MagicMock()
-    inner.id = "test-server"
-    inner.__aenter__ = AsyncMock(return_value=inner)
-    inner.__aexit__ = AsyncMock(return_value=None)
-    inner.get_tools = AsyncMock(return_value={})
-    inner.call_tool = AsyncMock(return_value="ok")
-
-    guarded = GuardedToolset(inner)
-    # Pre-set confirmed=True to verify it gets reset
-    guarded.confirmed = True
-
+    pending: dict = {123: (42, "movie")}  # Pre-existing pending confirmation
     mock_agent = MagicMock()
     handler = make_callback_handler(
-        mock_config, [guarded], mock_agent, profile_manager, history_manager
+        mock_config, [], mock_agent, profile_manager, history_manager,
+        pending_confirmations=pending,
     )
     update, context = make_callback_update("cancel", user_id=123)
 
     await handler(update, context)
 
-    assert guarded.confirmed is False
+    assert 123 not in pending
     update.callback_query.answer.assert_called_once()
     update.callback_query.edit_message_text.assert_called_once()
 

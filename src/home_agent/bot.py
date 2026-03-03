@@ -90,6 +90,7 @@ def make_message_handler(
     history_manager: HistoryManager,
     agent: Agent[AgentDeps, str],
     guarded_toolsets: list[GuardedToolset] | None = None,
+    pending_confirmations: dict[int, tuple[int, str]] | None = None,
 ):
     """Create a Telegram message handler closure that captures app config and managers.
 
@@ -98,14 +99,18 @@ def make_message_handler(
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history persistence.
         agent: The PydanticAI agent instance to use for inference.
-        guarded_toolsets: Optional list of GuardedToolset instances. If provided,
-            deps will be injected into each toolset before every agent.run() call
-            so that guards can access the current user's profile.
+        guarded_toolsets: Optional list of GuardedToolset instances. GuardedToolset
+            is now stateless — no deps injection needed.
+        pending_confirmations: Shared dict keyed by user_id for storing inline-keyboard
+            confirmations between the callback handler and the message handler.
 
     Returns:
         An async handler coroutine compatible with python-telegram-bot.
     """
     _guarded_toolsets: list[GuardedToolset] = guarded_toolsets or []
+    _pending_confirmations: dict[int, tuple[int, str]] = (
+        pending_confirmations if pending_confirmations is not None else {}
+    )
 
     async def handle_message(
         update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -144,6 +149,20 @@ def make_message_handler(
         raw_history = await history_manager.get_history(user_id=user_id)
         message_history = convert_history_to_messages(raw_history)
 
+        # Read and consume any pending confirmation from the inline keyboard
+        confirmed = False
+        if user_id in _pending_confirmations:
+            _media_id, _media_type = _pending_confirmations.pop(user_id)
+            confirmed = True
+            logger.info(
+                "Consumed pending confirmation for user",
+                extra={
+                    "user_id": user_id,
+                    "mediaId": _media_id,
+                    "mediaType": _media_type,
+                },
+            )
+
         deps = AgentDeps(
             config=config,
             profile_manager=profile_manager,
@@ -152,21 +171,10 @@ def make_message_handler(
             guarded_toolsets=_guarded_toolsets,
             telegram_bot=context.bot,
             telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
+            confirmed=confirmed,
+            called_tools=set(),
+            role=user_profile.role,
         )
-
-        # Inject deps into each GuardedToolset so gates can access the user profile.
-        # GuardedToolset is a long-lived instance reused across messages, so we must
-        # reset per-message state (called_tools, confirmed) here to prevent leakage
-        # between turns: e.g. a leftover confirmed=True from a previous message that
-        # failed after the user said 'yes' but before request_media was called.
-        for toolset in _guarded_toolsets:
-            toolset.deps = deps
-            toolset.called_tools = set()   # reset per-message state
-            toolset.confirmed = False       # reset per-message state
-            logger.debug(
-                "Injected deps and reset GuardedToolset state",
-                extra={"user_id": user_id},
-            )
 
         try:
             result = await agent.run(text, deps=deps, message_history=message_history)
@@ -220,24 +228,30 @@ def make_callback_handler(
     agent: Agent[AgentDeps, str],
     profile_manager: ProfileManager,
     history_manager: HistoryManager,
+    pending_confirmations: dict[int, tuple[int, str]] | None = None,
 ):
     """Create a Telegram CallbackQueryHandler for inline keyboard button presses.
 
     Handles callback data in the format 'confirm:{mediaId}:{mediaType}' and 'cancel'.
-    On confirm: sets GuardedToolset.confirmed=True and re-runs the agent with a
-    synthetic message to complete the request. On cancel: resets confirmed=False
-    and sends a cancellation message.
+    On confirm: stores the confirmation in pending_confirmations keyed by user_id,
+    then re-runs the agent with a synthetic message so it calls request_media.
+    On cancel: removes any pending confirmation and sends a cancellation message.
 
     Args:
         config: Application configuration for the allowed user whitelist.
-        guarded_toolsets: List of GuardedToolset instances to set confirmed on.
+        guarded_toolsets: List of GuardedToolset instances (stateless — not mutated).
         agent: The PydanticAI agent instance to re-run on confirmation.
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history persistence.
+        pending_confirmations: Shared dict for storing per-user confirmations.
+            If None, a new dict is created (isolated to this handler).
 
     Returns:
         An async handler coroutine compatible with python-telegram-bot.
     """
+    _pending_confirmations: dict[int, tuple[int, str]] = (
+        pending_confirmations if pending_confirmations is not None else {}
+    )
 
     async def handle_callback(
         update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -275,8 +289,12 @@ def make_callback_handler(
                 logger.warning("Invalid mediaId in callback data: %s", media_id_str)
                 return
 
-            for toolset in guarded_toolsets:
-                toolset.set_confirmed(media_id, media_type)
+            # Store confirmation keyed by user_id — handle_message will consume it
+            _pending_confirmations[user_id] = (media_id, media_type)
+            logger.info(
+                "Stored pending confirmation",
+                extra={"user_id": user_id, "mediaId": media_id, "mediaType": media_type},
+            )
 
             await query.edit_message_text(
                 "✅ Confirmed. Requesting now...",
@@ -284,11 +302,17 @@ def make_callback_handler(
             )
 
             # Re-run agent with a synthetic "yes confirmed" message so it calls
-            # request_media now that the confirmation gate is unblocked.
+            # request_media now that the confirmation gate will be unblocked.
             language_code = update.effective_user.language_code
             user_profile = await profile_manager.get(user_id, language_code=language_code)
             raw_history = await history_manager.get_history(user_id=user_id)
             message_history = convert_history_to_messages(raw_history)
+
+            # Consume the pending confirmation immediately for this re-run
+            confirmed = False
+            if user_id in _pending_confirmations:
+                _pending_confirmations.pop(user_id)
+                confirmed = True
 
             deps = AgentDeps(
                 config=config,
@@ -298,11 +322,10 @@ def make_callback_handler(
                 guarded_toolsets=guarded_toolsets,
                 telegram_bot=context.bot,
                 telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
+                confirmed=confirmed,
+                called_tools=set(),
+                role=user_profile.role,
             )
-            # Inject deps but do NOT reset confirmed — the flag was just set above
-            for toolset in guarded_toolsets:
-                toolset.deps = deps
-                toolset.called_tools = set()
 
             try:
                 result = await agent.run(
@@ -338,8 +361,8 @@ def make_callback_handler(
                     )
 
         elif data == "cancel":
-            for toolset in guarded_toolsets:
-                toolset.confirmed = False
+            # Remove any pending confirmation for this user
+            _pending_confirmations.pop(user_id, None)
             await query.edit_message_text("❌ Cancelled.")
             logger.info("User %d cancelled the media request", user_id)
 
@@ -362,19 +385,34 @@ def create_application(
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history persistence.
         agent: The PydanticAI agent instance to use for inference.
-        guarded_toolsets: Optional list of GuardedToolset instances whose deps
-            will be set before each agent.run() call.
+        guarded_toolsets: Optional list of GuardedToolset instances.
 
     Returns:
         A fully configured :class:`telegram.ext.Application` instance.
     """
     _guarded_toolsets = guarded_toolsets or []
+    # Shared dict — both handlers share the same reference so confirmations
+    # written by the callback handler are visible to the message handler.
+    pending_confirmations: dict[int, tuple[int, str]] = {}
+
     token = config.telegram_bot_token.get_secret_value()
     app: Application = Application.builder().token(token).build()
-    handler = make_message_handler(config, profile_manager, history_manager, agent, _guarded_toolsets)
+    handler = make_message_handler(
+        config,
+        profile_manager,
+        history_manager,
+        agent,
+        _guarded_toolsets,
+        pending_confirmations,
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
     callback_handler = make_callback_handler(
-        config, _guarded_toolsets, agent, profile_manager, history_manager
+        config,
+        _guarded_toolsets,
+        agent,
+        profile_manager,
+        history_manager,
+        pending_confirmations,
     )
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(_error_handler)

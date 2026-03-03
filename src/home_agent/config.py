@@ -39,6 +39,7 @@ class AppConfig(BaseSettings):
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 1.0
     llm_retry_max_delay: float = 30.0
+    admin_telegram_ids: list[int] = Field(default=[])
 
     model_config = SettingsConfigDict(
         env_file=".env",

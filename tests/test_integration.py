@@ -302,41 +302,17 @@ async def test_confirmation_mode_never_in_deps(
     assert deps.user_profile.confirmation_mode == "never"
 
 
-async def test_bot_sets_deps_on_guarded_toolsets(
+async def test_bot_sets_role_in_agent_deps(
     integration_config: AppConfig,
     integration_db: Path,
 ) -> None:
-    """make_message_handler sets deps on GuardedToolsets before agent.run().
+    """make_message_handler sets role in AgentDeps from user_profile.role.
 
-    Verifies that each GuardedToolset's deps attribute is set to the AgentDeps
-    built for the current request before agent.run() is called.
+    GuardedToolset is now stateless — deps are not set on the toolset.
+    Instead, role and confirmed are fields on AgentDeps created per-message.
     """
-    from unittest.mock import MagicMock
-
-    from home_agent.mcp.guarded_toolset import GuardedToolset
-
     profile_manager = ProfileManager(db_path=integration_db)
     history_manager = HistoryManager(db_path=integration_db)
-
-    # Track what deps were set on the toolset
-    captured_deps: list[AgentDeps] = []
-
-    class CapturingGuardedToolset(GuardedToolset):
-        def __init__(self) -> None:
-            super().__init__(MagicMock())
-            self._deps_set: AgentDeps | None = None
-
-        @property  # type: ignore[override]
-        def deps(self) -> AgentDeps | None:
-            return self._deps_set
-
-        @deps.setter
-        def deps(self, value: AgentDeps) -> None:
-            self._deps_set = value
-            if value is not None:
-                captured_deps.append(value)
-
-    guarded_toolset = CapturingGuardedToolset()
 
     mock_result = MagicMock()
     mock_result.output = "Done!"
@@ -348,14 +324,16 @@ async def test_bot_sets_deps_on_guarded_toolsets(
         profile_manager,
         history_manager,
         mock_agent,
-        guarded_toolsets=[guarded_toolset],
     )
     update = make_update("add Inception", user_id=12345)
     await handler(update, MagicMock())
 
-    # deps should have been set on the guarded toolset before agent.run()
-    assert len(captured_deps) == 1
-    assert captured_deps[0].user_profile.user_id == 12345
+    call_args = mock_agent.run.call_args
+    deps = call_args[1]["deps"]
+    assert deps.user_profile.user_id == 12345
+    assert deps.role == deps.user_profile.role
+    assert deps.confirmed is False
+    assert isinstance(deps.called_tools, set)
 
 
 async def test_bot_passes_guarded_toolsets_in_agent_deps(
@@ -434,15 +412,11 @@ async def test_confirm_request_tool_end_to_end(
     integration_config: AppConfig,
     integration_db: Path,
 ) -> None:
-    """confirm_request tool called by real agent sets confirmed on GuardedToolset.
+    """confirm_request tool called by real agent sets deps.confirmed = True.
 
     Uses PydanticAI's TestModel to force a confirm_request call and verifies
-    that set_confirmed is called on all guarded toolsets in deps.
+    that deps.confirmed is True after the agent run (stateless GuardedToolset).
     """
-    from unittest.mock import MagicMock
-
-    from home_agent.mcp.guarded_toolset import GuardedToolset
-
     profile_manager = ProfileManager(db_path=integration_db)
     history_manager = HistoryManager(db_path=integration_db)
 
@@ -455,14 +429,6 @@ async def test_confirm_request_tool_end_to_end(
     )
     await profile_manager.save(profile)
 
-    inner = MagicMock()
-    inner.id = "test-server"
-    inner.__aenter__ = AsyncMock(return_value=inner)
-    inner.__aexit__ = AsyncMock(return_value=None)
-    inner.get_tools = AsyncMock(return_value={})
-    inner.call_tool = AsyncMock(return_value="mock result")
-    guarded_toolset = GuardedToolset(inner)  # Real instance — AbstractToolset protocol enforced
-
     agent_instance = create_agent()
     m = TestModel(call_tools=["confirm_request"])
 
@@ -471,31 +437,31 @@ async def test_confirm_request_tool_end_to_end(
         profile_manager=profile_manager,
         history_manager=history_manager,
         user_profile=profile,
-        guarded_toolsets=[guarded_toolset],
+        confirmed=False,
+        called_tools=set(),
+        role="user",
     )
 
     with agent_instance.override(model=m):
         async with agent_instance:
             await agent_instance.run("yes, confirm the request", deps=deps)
 
-    # confirmed flag should be True on the real GuardedToolset instance
-    assert guarded_toolset.confirmed is True
+    # confirm_request sets deps.confirmed = True (stateless — no GuardedToolset mutation)
+    assert deps.confirmed is True
 
 
 async def test_e2e_new_user_quality_gate_blocks_request(
     integration_config: AppConfig,
     integration_db: Path,
 ) -> None:
-    """E2E: New user with no quality set — guard blocks request_media and asks for preference.
+    """E2E: New user with no quality set — guard blocks request_media via ctx.deps.
 
-    Verifies that when a new user (no quality in profile) triggers the agent,
-    and the agent tries to call request_media via a GuardedToolset, the quality
-    gate fires and the toolset returns the blocking error string.
+    Verifies that when a new user (no quality in profile) has their deps passed
+    to GuardedToolset via ctx.deps, the quality gate fires and returns a blocking
+    error string. State is read from deps (per-message, per-user), not from the
+    toolset singleton.
     """
     from home_agent.mcp.guarded_toolset import GuardedToolset
-
-    profile_manager = ProfileManager(db_path=integration_db)
-    history_manager = HistoryManager(db_path=integration_db)
 
     # New user: quality not set
     profile = UserProfile(
@@ -505,36 +471,26 @@ async def test_e2e_new_user_quality_gate_blocks_request(
         media_preferences=MediaPreferences(movie_quality=None),
         confirmation_mode="never",
     )
-    await profile_manager.save(profile)
 
     # Mock inner toolset (should never be called — guard intercepts first)
     mock_inner = MagicMock()
     mock_inner.call_tool = AsyncMock(return_value="should not reach here")
     guarded_toolset = GuardedToolset(mock_inner)
 
-    mock_result = MagicMock()
-    mock_result.output = "What quality do you prefer for movies?"
-    mock_agent = MagicMock()
-    mock_agent.run = AsyncMock(return_value=mock_result)
-
-    handler = make_message_handler(
-        integration_config,
-        profile_manager,
-        history_manager,
-        mock_agent,
-        guarded_toolsets=[guarded_toolset],
+    # Build per-user deps (as bot.py creates fresh for each message)
+    deps = AgentDeps(
+        config=integration_config,
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        confirmed=False,
+        called_tools=set(),
+        role="user",
     )
-    update = make_update("I want to watch Inception", user_id=12345)
-    await handler(update, MagicMock())
+    ctx = MagicMock()
+    ctx.deps = deps
 
-    # Bot sets deps on the guarded toolset before agent.run()
-    assert guarded_toolset.deps is not None
-    assert guarded_toolset.deps.user_profile.user_id == 12345
-    assert guarded_toolset.deps.user_profile.media_preferences.movie_quality is None
-
-    # Simulate what the agent would do: call request_media directly on the guarded toolset
-    # (Since we mocked the agent, we test the guard behaviour directly)
-    result = await _call(guarded_toolset, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
+    result = await guarded_toolset.call_tool("request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}, ctx, MagicMock())
     assert "movie_quality not set" in result.lower()
     assert "set_movie_quality" in result
     mock_inner.call_tool.assert_not_called()
@@ -544,17 +500,14 @@ async def test_e2e_confirmation_mode_always_flow(
     integration_config: AppConfig,
     integration_db: Path,
 ) -> None:
-    """E2E: User with confirmation_mode='always' — confirm_request gate works end-to-end.
+    """E2E: User with confirmation_mode='always' — confirmation gate via ctx.deps.confirmed.
 
     Verifies that:
-    1. bot.py injects deps with correct confirmation_mode into the GuardedToolset
-    2. Without set_confirmed, request_media is blocked
-    3. After set_confirmed, request_media succeeds
+    1. Without confirmed=True in deps, request_media is blocked
+    2. With confirmed=True in deps, request_media succeeds
+    3. State is isolated per-message via AgentDeps (stateless GuardedToolset)
     """
     from home_agent.mcp.guarded_toolset import GuardedToolset
-
-    profile_manager = ProfileManager(db_path=integration_db)
-    history_manager = HistoryManager(db_path=integration_db)
 
     profile = UserProfile(
         user_id=12345,
@@ -563,39 +516,42 @@ async def test_e2e_confirmation_mode_always_flow(
         media_preferences=MediaPreferences(movie_quality="4k", series_quality="1080p"),
         confirmation_mode="always",
     )
-    await profile_manager.save(profile)
 
     mock_inner = MagicMock()
     mock_inner.call_tool = AsyncMock(return_value="Request accepted!")
     guarded_toolset = GuardedToolset(mock_inner)
 
-    mock_result = MagicMock()
-    mock_result.output = "Please confirm: request Inception in 4K?"
-    mock_agent = MagicMock()
-    mock_agent.run = AsyncMock(return_value=mock_result)
-
-    handler = make_message_handler(
-        integration_config,
-        profile_manager,
-        history_manager,
-        mock_agent,
-        guarded_toolsets=[guarded_toolset],
+    # Message 1: no confirmation → guard blocks
+    deps_unconfirmed = AgentDeps(
+        config=integration_config,
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        confirmed=False,
+        called_tools=set(),
+        role="user",
     )
-    update = make_update("Request Inception", user_id=12345)
-    await handler(update, MagicMock())
+    ctx_unconfirmed = MagicMock()
+    ctx_unconfirmed.deps = deps_unconfirmed
 
-    # Deps injected: confirmation_mode is 'always'
-    assert guarded_toolset.deps is not None
-    assert guarded_toolset.deps.user_profile.confirmation_mode == "always"
-
-    # Without confirmation → guard blocks
-    result_blocked = await _call(guarded_toolset, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
+    result_blocked = await guarded_toolset.call_tool("request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}, ctx_unconfirmed, MagicMock())
     assert "confirmation required" in result_blocked.lower()
     mock_inner.call_tool.assert_not_called()
 
-    # After confirmation → guard passes
-    guarded_toolset.set_confirmed(mediaId=123, mediaType="movie")
-    result_allowed = await _call(guarded_toolset, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True})
+    # Message 2: with confirmed=True → guard passes
+    deps_confirmed = AgentDeps(
+        config=integration_config,
+        profile_manager=MagicMock(),
+        history_manager=MagicMock(),
+        user_profile=profile,
+        confirmed=True,
+        called_tools=set(),
+        role="user",
+    )
+    ctx_confirmed = MagicMock()
+    ctx_confirmed.deps = deps_confirmed
+
+    result_allowed = await guarded_toolset.call_tool("request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}, ctx_confirmed, MagicMock())
     assert result_allowed == "Request accepted!"
     mock_inner.call_tool.assert_called_once()
 
@@ -604,28 +560,14 @@ async def test_bot_resets_guarded_toolset_state_per_message(
     integration_config: AppConfig,
     integration_db: Path,
 ) -> None:
-    """make_message_handler resets called_tools and confirmed on GuardedToolsets each message.
+    """AgentDeps created fresh per message ensures no state leaks between messages.
 
-    GuardedToolset is a long-lived instance reused across messages.  State left
-    over from a previous turn (e.g. confirmed=True, called_tools={'search_media'})
-    must be cleared before each agent.run() call so it cannot leak into the next
-    message.
-
-    Verifies that even when the toolset starts with dirty state, both fields are
-    False/empty after handle_message processes a new message.
+    GuardedToolset is now stateless — state (confirmed, called_tools) lives in
+    AgentDeps (created fresh each message). This test verifies that each new
+    message gets fresh AgentDeps with confirmed=False and empty called_tools.
     """
-    from home_agent.mcp.guarded_toolset import GuardedToolset
-
     profile_manager = ProfileManager(db_path=integration_db)
     history_manager = HistoryManager(db_path=integration_db)
-
-    inner = MagicMock()
-    inner.id = "test-server"
-    guarded_toolset = GuardedToolset(inner)
-
-    # Simulate dirty state left over from a previous message
-    guarded_toolset.confirmed = True
-    guarded_toolset.called_tools = {"search_media"}
 
     mock_result = MagicMock()
     mock_result.output = "Done!"
@@ -637,14 +579,68 @@ async def test_bot_resets_guarded_toolset_state_per_message(
         profile_manager,
         history_manager,
         mock_agent,
-        guarded_toolsets=[guarded_toolset],
     )
     update = make_update("new message", user_id=12345)
     await handler(update, MagicMock())
 
-    # Both fields must be reset before agent.run() was called
-    assert guarded_toolset.confirmed is False
-    assert guarded_toolset.called_tools == set()
+    # Verify fresh AgentDeps has confirmed=False and empty called_tools
+    call_args = mock_agent.run.call_args
+    deps = call_args[1]["deps"]
+    assert deps.confirmed is False
+    assert deps.called_tools == set()
+
+
+async def test_guarded_toolset_framework_boundary(
+    integration_config: AppConfig,
+    integration_db: Path,
+) -> None:
+    """GuardedToolset satisfies PydanticAI's AbstractToolset protocol end-to-end.
+
+    This is the mandatory framework boundary test per AGENTS.md:
+    A real GuardedToolset (not MagicMock) is passed to create_agent() and
+    exercised through PydanticAI's real Agent.__aenter__/__aexit__ lifecycle
+    and agent.run() call path — verifying AbstractToolset subclass contract,
+    get_tools() return type, and call_tool() arity are all correct at runtime.
+    """
+    from home_agent.mcp.guarded_toolset import GuardedToolset
+
+    profile_manager = ProfileManager(db_path=integration_db)
+    history_manager = HistoryManager(db_path=integration_db)
+
+    profile = UserProfile(
+        user_id=12345,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        media_preferences=MediaPreferences(movie_quality="1080p"),
+    )
+    await profile_manager.save(profile)
+
+    # Build a properly mocked inner toolset (no MCP connection needed)
+    inner = MagicMock()
+    inner.id = "test-server"
+    inner.__aenter__ = AsyncMock(return_value=inner)
+    inner.__aexit__ = AsyncMock(return_value=None)
+    inner.get_tools = AsyncMock(return_value={})
+    inner.call_tool = AsyncMock(return_value="mock result")
+
+    guarded = GuardedToolset(inner)  # Real instance — AbstractToolset contract enforced
+
+    # Pass real GuardedToolset to create_agent() — PydanticAI validates the toolset
+    agent_instance = create_agent(toolsets=[guarded])
+    m = TestModel()
+
+    deps = AgentDeps(
+        config=integration_config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=profile,
+    )
+
+    with agent_instance.override(model=m):
+        async with agent_instance:  # Exercises __aenter__/__aexit__ lifecycle
+            result = await agent_instance.run("hello", deps=deps)
+
+    assert result.output is not None
 
 
 async def test_language_switch_persists_across_messages(

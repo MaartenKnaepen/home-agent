@@ -8,11 +8,11 @@ last_updated: "2026-02-28"
 
 current_state:
   phase: 4
-  step: "4.1"
-  name: "Rich Telegram Formatting"
+  step: "4.3"
+  name: "Multi-User Support & GuardedToolset Stateless Refactor"
   status: "complete"
-  next_step: "4.3 — Multi-User Support (4.2 removed, handled by Seerr natively)"
-  description: "Implemented GuardedToolset wrapper for MCP tool call middleware using Option B from tool_control.md. Guards enforce quality must be set before request_media. Confirmation gate blocks request_media when confirmation_mode='always'. confirm_request tool sets the confirmed flag. All non-gated tools pass through transparently (search_media, future PDF/file tools). Wired GuardedToolsets into agent pipeline: MCPRegistry wraps toolsets, bot.py injects deps before agent.run(), main.py passes guarded_toolsets through the composition chain."
+  next_step: "4.4 — Voice Message Support (Qwen3-ASR-1.7B on CPU)"
+  description: "GuardedToolset made fully stateless — removed self.deps, self.confirmed, self.called_tools. call_tool() reads all user state from ctx.deps (per-user AgentDeps). confirmed, called_tools, role moved to AgentDeps. pending_confirmations dict in bot.py scopes confirmations per user_id. Permission levels added: admin/user/read_only roles on UserProfile. admin_telegram_ids in AppConfig. read_only blocked from request_media in GuardedToolset. 229 tests pass, asyncio.gather concurrent isolation test proves multi-user safety."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -85,6 +85,11 @@ current_state:
   known_issues: []
 
 completed_steps:
+  - step: "4.3"
+    name: "Multi-User Support & GuardedToolset Stateless Refactor"
+    date: "2026-03-02"
+    summary: "Fixed critical concurrent multi-user bug: GuardedToolset was a shared singleton with mutable self.deps/confirmed/called_tools — last writer wins race condition. Made GuardedToolset fully stateless (only stores inner_toolset). call_tool() reads all state from ctx.deps which PydanticAI passes per-call with the correct user's deps. confirmed/called_tools/role moved to AgentDeps (created fresh per-user per-message). Callback handler writes to pending_confirmations[user_id] dict; handle_message pops and consumes it before building AgentDeps. Added role: Literal['admin','user','read_only'] to UserProfile. admin_telegram_ids in AppConfig auto-assigns admin role. read_only blocked from request_media. 229 tests pass. asyncio.gather concurrent test proves isolation."
+    decision: "Moved per-user state to AgentDeps rather than using per-user state dict inside GuardedToolset. This leverages PydanticAI's existing ctx.deps passing mechanism — no additional wiring needed. pending_confirmations dict in bot.py closure is the simplest solution for bridging the callback handler (no agent) to handle_message (agent run)."
   - step: "4.1"
     name: "Rich Telegram Formatting"
     date: "2026-03-02"

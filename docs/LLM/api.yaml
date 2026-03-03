@@ -406,6 +406,45 @@ modules:
         signature: "str"
         description: "Base URL for TMDB CDN poster images: 'https://image.tmdb.org/t/p/w500'. Append posterPath from get_media_details to form full URL."
 
+  # ── Multi-User & Permissions ──────────────────────────────────────────────────
+  - module: "src/home_agent/profile.py (role field)"
+    exports:
+      - name: "UserProfile.role"
+        type: "field"
+        signature: "Literal['admin', 'user', 'read_only'] = 'user'"
+        description: "Permission level for this user. 'admin': full access, auto-assigned from config.admin_telegram_ids. 'user': default, can search and request. 'read_only': can search but request_media is blocked by GuardedToolset role gate."
+
+  - module: "src/home_agent/config.py (admin_telegram_ids)"
+    exports:
+      - name: "AppConfig.admin_telegram_ids"
+        type: "field"
+        signature: "list[int] = []"
+        description: "Telegram user IDs to auto-assign admin role on profile creation or update. Subset of allowed_telegram_ids. Set via ADMIN_TELEGRAM_IDS env var as JSON array."
+
+  - module: "src/home_agent/agent.py (AgentDeps additions for 4.3)"
+    exports:
+      - name: "AgentDeps.confirmed"
+        type: "dataclass field"
+        signature: "bool = False"
+        description: "Per-user per-message confirmation flag. Set True in handle_message if a pending_confirmations entry exists for this user (from ✅ button press). Read by GuardedToolset.call_tool() via ctx.deps. Replaces the old stateful self.confirmed on GuardedToolset."
+
+      - name: "AgentDeps.called_tools"
+        type: "dataclass field"
+        signature: "set[str] = field(default_factory=set)"
+        description: "Per-user per-message set of tool names called this turn. Updated by GuardedToolset.call_tool() via ctx.deps.called_tools.add(name). Replaces the old stateful self.called_tools on GuardedToolset."
+
+      - name: "AgentDeps.role"
+        type: "dataclass field"
+        signature: "Literal['admin', 'user', 'read_only'] = 'user'"
+        description: "Permission level copied from UserProfile.role when AgentDeps is built. Read by GuardedToolset.call_tool() via ctx.deps.role to enforce role gate (read_only cannot call request_media)."
+
+  - module: "src/home_agent/bot.py (pending_confirmations)"
+    exports:
+      - name: "pending_confirmations"
+        type: "closure variable (dict)"
+        signature: "dict[int, tuple[int, str]]"
+        description: "Scoped per create_application() call. Keys are user_id (int). Values are (mediaId, mediaType) tuples. Written by make_callback_handler when user presses ✅ Yes. Consumed (popped) by make_message_handler at the start of each handle_message call. Bridges the stateless callback handler to the agent run. No cross-user leakage possible — each handler only accesses its own user_id key."
+
   # ── Callback Handler ──────────────────────────────────────────────────────────
   - module: "src/home_agent/bot.py (callback handler)"
     exports:

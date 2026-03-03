@@ -798,30 +798,83 @@ phases:
       to Telegram via webhooks. No custom poller or webhook receiver needed in the bot.
       Configure Seerr notifications in Seerr settings instead.'
   - files:
-    - src/home_agent/profile.py
+    - src/home_agent/mcp/guarded_toolset.py
+    - src/home_agent/agent.py
     - src/home_agent/bot.py
+    - src/home_agent/profile.py
+    - tests/test_guarded_toolset.py
+    - tests/test_agent.py
+    - tests/test_bot.py
     - tests/test_multi_user.py
-    goal: Multiple users with separate profiles and permission levels.
+    goal: Make GuardedToolset stateless so it is safe for concurrent multi-user access.
+      Move per-user state (confirmed, called_tools) from the shared GuardedToolset
+      singleton into AgentDeps (created fresh per-user per-message). Add permission
+      levels (admin, user, read-only) to UserProfile.
     id: '4.3'
-    name: Multi-User Support
-    notes: ''
-    scope: '- Per-user profile isolation (already implemented via telegram_id in UserProfile)
+    name: Multi-User Support & GuardedToolset Stateless Refactor
+    detailed_plan: docs/LLM/plans/step-4.3.rovo-plan.yaml
+    notes: 'CRITICAL BUG: GuardedToolset is a long-lived singleton shared across all
+      users. It currently stores self.deps, self.confirmed, and self.called_tools as
+      instance fields. With concurrent users, these fields are overwritten by whoever
+      sends a message last — User A''s confirmed flag can be set by User B''s confirmation,
+      and User A''s quality check reads User B''s profile. This is a silent data
+      corruption bug that only manifests with 2+ simultaneous users.
 
-      - Permission levels: admin, user, read-only — stored in UserProfile
+      FIX — Make GuardedToolset stateless:
+      - Remove self.deps, self.confirmed, self.called_tools from GuardedToolset
+      - GuardedToolset stores ONLY self.inner_toolset (immutable, set once)
+      - call_tool() reads all state from ctx.deps (passed by PydanticAI per-call)
+      - confirmed: bool = False moved to AgentDeps (created fresh each message)
+      - called_tools: set[str] moved to AgentDeps (created fresh each message)
+      - bot.py: remove the per-message toolset.deps = deps and state reset loop
+        (no longer needed — GuardedToolset is now stateless)
+      - bot.py callback handler: store confirmed per-user in a
+        pending_confirmations: dict[int, tuple[int, str]] field on the application
+        (keyed by user_id → (mediaId, mediaType)). handle_message reads and clears it.
+      - GuardedToolset.set_confirmed() removed — callback handler writes to
+        pending_confirmations dict instead; AgentDeps.confirmed is set from there.
 
-      - Admin can manage other users'' permissions via chat command
-
-      - Admin user ID configured in AppConfig (ADMIN_TELEGRAM_ID)
-
-      '
+      ALSO: add permission levels to UserProfile for multi-user access control.'
+    scope: "PART 1 — GuardedToolset stateless refactor:\n- GuardedToolset.__init__:\
+      \ remove self.deps, self.confirmed, self.called_tools\n- GuardedToolset.call_tool():\
+      \ read quality from ctx.deps.user_profile.media_preferences,\n  read confirmed\
+      \ from ctx.deps.confirmed, read called_tools from ctx.deps.called_tools\n- GuardedToolset.set_confirmed():\
+      \ remove (no longer needed)\n- AgentDeps: add confirmed: bool = False and called_tools:\
+      \ set[str] = field(default_factory=set)\n- bot.py handle_message: remove the\
+      \ 'for toolset in _guarded_toolsets: toolset.deps = ...' loop\n- bot.py handle_message:\
+      \ read pending confirmation for this user from app-level dict,\n  set AgentDeps.confirmed=True\
+      \ if found, clear the entry\n- bot.py callback handler: write to pending_confirmations[user_id]\
+      \ = (mediaId, mediaType)\n  instead of calling toolset.set_confirmed()\n- bot.py:\
+      \ pending_confirmations: dict[int, tuple[int, str]] stored as application.bot_data\
+      \ or\n  a closure variable in create_application()\n- All existing GuardedToolset\
+      \ tests updated for stateless API\n- GuardedToolset is now completely thread-safe\
+      \ for concurrent users\n\nPART 2 — Permission levels:\n- UserProfile: add role:\
+      \ Literal['admin', 'user', 'read_only'] = 'user'\n- AppConfig: add admin_telegram_ids:\
+      \ list[int] = [] (list of admin user IDs, separate from allowed_telegram_ids)\n\
+      - bot.py: check role before processing — read_only users get 'you can search\
+      \ but not request' message when they try to request media\n- GuardedToolset.call_tool():\
+      \ add role gate — if role == 'read_only' and tool == 'request_media', return\
+      \ error string 'You do not have permission to request media.'\n- ProfileManager:\
+      \ auto-assign 'admin' role if user_id in config.admin_telegram_ids on profile\
+      \ creation\n- No admin management commands in Phase 4 — admin manually edits\
+      \ DB or config for now\n"
     status: pending
-    test: '- test_multi_user.py — Two users have separate profiles and conversation histories
-
-      - Read-only user can search but not request media
-
-      - Admin can view and modify other users'' permissions
-
-      '
+    test: "PART 1 — Stateless GuardedToolset:\n- test_guarded_toolset.py — call_tool\
+      \ reads confirmed from ctx.deps not self.confirmed\n- test_guarded_toolset.py\
+      \ — call_tool reads quality from ctx.deps.user_profile not self.deps\n- test_guarded_toolset.py\
+      \ — two concurrent calls with different ctx.deps do not interfere\n- test_guarded_toolset.py\
+      \ — GuardedToolset has no deps/confirmed/called_tools attributes\n- test_bot.py\
+      \ — pending_confirmations dict stores confirmation per user_id\n- test_bot.py\
+      \ — callback handler writes to pending_confirmations, not toolset\n- test_bot.py\
+      \ — handle_message reads and clears pending_confirmations[user_id]\n- test_multi_user.py\
+      \ — User A confirmation does not affect User B's request gate\n- test_multi_user.py\
+      \ — User A and User B have independent confirmed flags in AgentDeps\n- test_multi_user.py\
+      \ — User A's quality preference does not bleed into User B's request\n\nPART\
+      \ 2 — Permissions:\n- test_multi_user.py — read_only user search_media passes\
+      \ through\n- test_multi_user.py — read_only user request_media blocked with permission\
+      \ error\n- test_multi_user.py — admin user auto-assigned admin role on profile\
+      \ creation\n- test_multi_user.py — normal user gets 'user' role by default\n\
+      - test_config.py — admin_telegram_ids parses from env var correctly\n"
   - files:
     - deployment/docker-compose.yml
     - src/home_agent/bot.py

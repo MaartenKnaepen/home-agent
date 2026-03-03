@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic_ai import Agent, RunContext
 from telegram import Bot
@@ -36,17 +36,28 @@ logger = logging.getLogger(__name__)
 class AgentDeps:
     """Dependencies injected into the agent at runtime.
 
+    All fields are per-user and per-message — a fresh AgentDeps is created
+    for each incoming message in handle_message(). GuardedToolset reads state
+    from ctx.deps (this dataclass) via PydanticAI's RunContext, making the
+    GuardedToolset itself stateless and safe for concurrent multi-user access.
+
     Attributes:
         config: Application configuration.
         profile_manager: Manages user profile persistence.
         history_manager: Manages conversation history.
         user_profile: The current user's profile.
         guarded_toolsets: GuardedToolset instances wrapping MCP toolsets.
-            The confirm_request tool sets the confirmed flag on each of these.
         telegram_bot: Telegram Bot instance for sending messages/photos.
             Set by bot.py before each agent.run() call. None in tests.
         telegram_chat_id: Telegram chat ID for sending messages.
             Set by bot.py before each agent.run() call. None in tests.
+        confirmed: True when the user has confirmed a pending media request
+            via the inline keyboard ✅ button. Read by GuardedToolset.call_tool()
+            to unblock the confirmation gate for this turn only.
+        called_tools: Names of MCP tools called successfully this turn.
+            Tracked by GuardedToolset.call_tool() for observability.
+        role: Permission level for this user — 'admin', 'user', or 'read_only'.
+            Read by GuardedToolset.call_tool() to enforce the role gate.
     """
 
     config: AppConfig
@@ -56,6 +67,9 @@ class AgentDeps:
     guarded_toolsets: list[GuardedToolset] = field(default_factory=list)
     telegram_bot: Bot | None = None
     telegram_chat_id: int | None = None
+    confirmed: bool = False
+    called_tools: set[str] = field(default_factory=set)
+    role: Literal["admin", "user", "read_only"] = "user"
 
 
 def create_agent(

@@ -125,7 +125,8 @@ async def confirm_request(
     """Confirm that the user approves the media request.
 
     Call this after the user says yes to your confirmation prompt.
-    In Phase 4, this will be triggered by an inline keyboard button press.
+    Sets ctx.deps.confirmed = True so GuardedToolset will unblock
+    the next request_media call for this turn.
 
     Args:
         ctx: Runtime context with dependencies.
@@ -135,12 +136,8 @@ async def confirm_request(
     Returns:
         Confirmation string.
     """
-    guarded_toolsets = getattr(ctx.deps, "guarded_toolsets", [])
-    if not guarded_toolsets:
-        return "ERROR: No guarded toolset available. Cannot confirm."
-
-    for toolset in guarded_toolsets:
-        toolset.set_confirmed(mediaId, mediaType)
+    if hasattr(ctx.deps, "confirmed"):
+        ctx.deps.confirmed = True
 
     logger.info(
         "confirm_request called",

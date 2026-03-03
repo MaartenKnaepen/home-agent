@@ -69,6 +69,7 @@ class UserProfile(BaseModel):
         confirmation_mode: Whether the agent confirms before requesting media.
         media_preferences: Media download preferences.
         notes: Personal notes or observations about the user.
+        role: Permission level — 'admin', 'user', or 'read_only'.
     """
 
     user_id: int
@@ -79,6 +80,7 @@ class UserProfile(BaseModel):
     confirmation_mode: Literal["always", "never"] = "always"
     media_preferences: MediaPreferences = MediaPreferences()
     notes: list[str] = []
+    role: Literal["admin", "user", "read_only"] = "user"
 
 
 class ProfileManager:
@@ -90,6 +92,7 @@ class ProfileManager:
     Attributes:
         db_path: Path to the SQLite database file.
         default_profile: Template for creating default profiles when needed.
+        admin_telegram_ids: Set of Telegram user IDs that receive the admin role.
     """
 
     def __init__(
@@ -97,15 +100,18 @@ class ProfileManager:
         db_path: str | Path,
         *,
         default_profile: UserProfile | None = None,
+        admin_telegram_ids: list[int] | None = None,
     ) -> None:
         """Initialize the ProfileManager with database path and default profile.
 
         Args:
             db_path: Path to the SQLite database file.
             default_profile: Optional template for creating default profiles.
+            admin_telegram_ids: Optional list of Telegram IDs to auto-assign admin role.
         """
         self.db_path = Path(db_path)
         self.default_profile = default_profile or self._create_default_profile()
+        self.admin_telegram_ids: frozenset[int] = frozenset(admin_telegram_ids or [])
 
     def _create_default_profile(self) -> UserProfile:
         """Create a default UserProfile instance.
@@ -123,8 +129,24 @@ class ProfileManager:
             notes=[],
         )
 
+    def _resolve_role(self, user_id: int, existing_role: str = "user") -> str:
+        """Resolve the correct role for a user based on admin_telegram_ids.
+
+        Args:
+            user_id: Telegram user ID.
+            existing_role: The role currently stored for the user.
+
+        Returns:
+            'admin' if the user is in admin_telegram_ids, otherwise existing_role.
+        """
+        if user_id in self.admin_telegram_ids:
+            return "admin"
+        return existing_role
+
     async def get(self, user_id: int, *, language_code: str | None = None) -> UserProfile:
         """Get or create user profile from the database.
+
+        Auto-assigns 'admin' role if user_id is in admin_telegram_ids.
 
         Args:
             user_id: Telegram user ID to retrieve profile for.
@@ -157,18 +179,28 @@ class ProfileManager:
             if "updated_at" not in profile_dict:
                 profile_dict["updated_at"] = datetime.now(tz=timezone.utc)
 
-            return UserProfile(**profile_dict)
+            profile = UserProfile(**profile_dict)
+
+            # Auto-update role if admin list has changed
+            expected_role = self._resolve_role(user_id, profile.role)
+            if profile.role != expected_role:
+                profile = profile.model_copy(update={"role": expected_role})
+                await self.save(profile)
+
+            return profile
 
         # Create default profile for new user using the stored template
         logger.info("Creating default profile for user %s", user_id)
         now = datetime.now(tz=timezone.utc)
         reply_language = resolve_language(language_code)
+        role = self._resolve_role(user_id)
         new_profile = self.default_profile.model_copy(
             update={
                 "user_id": user_id,
                 "created_at": now,
                 "updated_at": now,
                 "reply_language": reply_language,
+                "role": role,
             }
         )
         await self.save(new_profile)

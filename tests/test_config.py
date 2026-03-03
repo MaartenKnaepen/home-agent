@@ -52,3 +52,17 @@ def test_retry_max_delay_default(mock_env):
     """llm_retry_max_delay defaults to 30.0."""
     config = AppConfig()
     assert config.llm_retry_max_delay == 30.0
+
+
+def test_admin_telegram_ids_default_empty(mock_env):
+    """admin_telegram_ids defaults to an empty list."""
+    config = AppConfig()
+    assert config.admin_telegram_ids == []
+
+
+def test_admin_telegram_ids_parsed_from_env(mock_env):
+    """admin_telegram_ids is parsed correctly from env."""
+    import os
+    os.environ["ADMIN_TELEGRAM_IDS"] = "[111, 222]"
+    config = AppConfig()
+    assert config.admin_telegram_ids == [111, 222]

@@ -270,24 +270,21 @@ async def test_profile_tools_registered_on_agent(
 
 
 @pytest.mark.asyncio
-async def test_confirm_request_sets_flag_on_guarded_toolset(
+async def test_confirm_request_sets_confirmed_in_deps(
     mock_config: AppConfig, test_db: Path
 ) -> None:
-    """confirm_request calls set_confirmed on every guarded toolset."""
+    """confirm_request sets ctx.deps.confirmed = True (stateless — no GuardedToolset mutation)."""
     profile_manager = ProfileManager(test_db)
     history_manager = HistoryManager(test_db)
     profile = make_test_profile(user_id=60)
     await profile_manager.save(profile)
-
-    guarded_toolset = MagicMock()
-    guarded_toolset.set_confirmed = MagicMock()
 
     deps = AgentDeps(
         config=mock_config,
         profile_manager=profile_manager,
         history_manager=history_manager,
         user_profile=profile,
-        guarded_toolsets=[guarded_toolset],
+        confirmed=False,
     )
     ctx = MagicMock(spec=RunContext)
     ctx.deps = deps
@@ -297,64 +294,7 @@ async def test_confirm_request_sets_flag_on_guarded_toolset(
     assert "Confirmed" in result
     assert "123" in result
     assert "MOVIE" in result
-    guarded_toolset.set_confirmed.assert_called_once_with(123, "movie")
-
-
-@pytest.mark.asyncio
-async def test_confirm_request_multiple_guarded_toolsets(
-    mock_config: AppConfig, test_db: Path
-) -> None:
-    """confirm_request sets confirmed on all guarded toolsets."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-    profile = make_test_profile(user_id=61)
-    await profile_manager.save(profile)
-
-    toolset_a = MagicMock()
-    toolset_a.set_confirmed = MagicMock()
-    toolset_b = MagicMock()
-    toolset_b.set_confirmed = MagicMock()
-
-    deps = AgentDeps(
-        config=mock_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        guarded_toolsets=[toolset_a, toolset_b],
-    )
-    ctx = MagicMock(spec=RunContext)
-    ctx.deps = deps
-
-    await confirm_request(ctx, mediaId=456, mediaType="tv")
-
-    toolset_a.set_confirmed.assert_called_once_with(456, "tv")
-    toolset_b.set_confirmed.assert_called_once_with(456, "tv")
-
-
-@pytest.mark.asyncio
-async def test_confirm_request_no_guarded_toolsets_returns_error(
-    mock_config: AppConfig, test_db: Path
-) -> None:
-    """confirm_request returns an error string when no guarded toolsets are available."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-    profile = make_test_profile(user_id=62)
-    await profile_manager.save(profile)
-
-    deps = AgentDeps(
-        config=mock_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        guarded_toolsets=[],
-    )
-    ctx = MagicMock(spec=RunContext)
-    ctx.deps = deps
-
-    result = await confirm_request(ctx, mediaId=789, mediaType="movie")
-
-    assert "ERROR" in result
-    assert "No guarded toolset" in result
+    assert deps.confirmed is True
 
 
 @pytest.mark.asyncio
@@ -369,15 +309,12 @@ async def test_confirm_request_logs_info(
     profile = make_test_profile(user_id=63)
     await profile_manager.save(profile)
 
-    guarded_toolset = MagicMock()
-    guarded_toolset.set_confirmed = MagicMock()
-
     deps = AgentDeps(
         config=mock_config,
         profile_manager=profile_manager,
         history_manager=history_manager,
         user_profile=profile,
-        guarded_toolsets=[guarded_toolset],
+        confirmed=False,
     )
     ctx = MagicMock(spec=RunContext)
     ctx.deps = deps
@@ -575,4 +512,5 @@ async def test_confirm_request_via_agent_run(
         async with agent_instance:
             await agent_instance.run("yes, confirm the request", deps=deps)
 
-    assert guarded.confirmed is True
+    # confirm_request now sets deps.confirmed = True (stateless GuardedToolset)
+    assert deps.confirmed is True

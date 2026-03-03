@@ -1,0 +1,526 @@
+---
+step: 4.3
+title: Multi-User Support & GuardedToolset Stateless Refactor
+goal: >
+  Fix a critical concurrent multi-user bug by making GuardedToolset stateless.
+  Move per-user state (confirmed, called_tools) from the shared singleton into
+  AgentDeps (created fresh per-user per-message). Add role-based permission
+  levels (admin, user, read_only) to UserProfile.
+
+approach: |
+  PART 1 — Stateless GuardedToolset (the critical fix):
+  GuardedToolset is a long-lived singleton shared across ALL users. It currently
+  stores self.deps, self.confirmed, and self.called_tools as mutable instance
+  fields. With concurrent users this is a race condition: User A's confirmed flag
+  can be set by User B's button press, and User A's quality check reads User B's
+  profile because deps was overwritten.
+
+  The fix: GuardedToolset stores ONLY self.inner_toolset (immutable, set once
+  at registry creation time). call_tool() reads all user state from ctx.deps —
+  which PydanticAI passes through per-call with the correct user's deps.
+  confirmed and called_tools move into AgentDeps (created fresh each message).
+  The callback handler stores confirmations in a pending_confirmations dict
+  keyed by user_id; handle_message reads and clears it when building AgentDeps.
+
+  PART 2 — Permission levels:
+  Add role: Literal['admin', 'user', 'read_only'] = 'user' to UserProfile.
+  read_only users can search but not request media (blocked in GuardedToolset).
+  admin role auto-assigned based on admin_telegram_ids in AppConfig.
+
+---
+
+## Key Files
+
+### Modified Files
+- `src/home_agent/mcp/guarded_toolset.py` — Remove stateful fields, read from ctx.deps
+- `src/home_agent/agent.py` — Add confirmed, called_tools, role to AgentDeps
+- `src/home_agent/bot.py` — pending_confirmations dict, remove toolset state reset loop
+- `src/home_agent/profile.py` — Add role field to UserProfile
+- `src/home_agent/config.py` — Add admin_telegram_ids list
+- `tests/test_guarded_toolset.py` — Update all tests for stateless API
+- `tests/test_agent.py` — Update AgentDeps tests
+- `tests/test_bot.py` — Update callback handler tests
+- `tests/test_multi_user.py` — New multi-user isolation tests
+- `tests/test_config.py` — admin_telegram_ids parsing
+
+---
+
+## Step-by-Step Implementation
+
+### 1. GuardedToolset — Remove all stateful fields
+
+**File:** `src/home_agent/mcp/guarded_toolset.py`
+
+Before (stateful — broken for multi-user):
+```python
+class GuardedToolset(AbstractToolset[Any]):
+    def __init__(self, inner_toolset: Any) -> None:
+        self.inner_toolset = inner_toolset
+        self.deps: Any | None = None        # ← REMOVE
+        self.confirmed: bool = False         # ← REMOVE
+        self.called_tools: set[str] = set() # ← REMOVE
+
+    async def call_tool(self, name, tool_args, ctx, tool):
+        if self._needs_confirmation() and not self.confirmed:  # ← reads self
+            ...
+        if not self._has_movie_quality():  # ← reads self.deps
+            ...
+```
+
+After (stateless — safe for any number of concurrent users):
+```python
+class GuardedToolset(AbstractToolset[Any]):
+    def __init__(self, inner_toolset: Any) -> None:
+        self.inner_toolset = inner_toolset
+        # No mutable state — this object is now fully thread-safe
+
+    @property
+    def id(self) -> str | None:
+        return self.inner_toolset.id
+
+    async def __aenter__(self) -> "GuardedToolset":
+        await self.inner_toolset.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool | None:
+        return await self.inner_toolset.__aexit__(*args)
+
+    async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
+        return await self.inner_toolset.get_tools(ctx)
+
+    async def call_tool(
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        ctx: RunContext[Any],
+        tool: ToolsetTool[Any],
+    ) -> Any:
+        """Apply guards then forward to inner toolset.
+
+        All state is read from ctx.deps — the per-user, per-message
+        AgentDeps created fresh for each message. This makes GuardedToolset
+        safe for concurrent multi-user access.
+        """
+        # Gate 0: read_only role cannot request media
+        if name == "request_media":
+            role = getattr(ctx.deps, "role", "user")
+            if role == "read_only":
+                msg = "You do not have permission to request media."
+                logger.warning(
+                    "request_media blocked by role gate",
+                    extra={"reason": "read_only_role"}
+                )
+                return msg
+
+        # Gate 1: quality must be set
+        if name == "request_media":
+            media_type = tool_args.get("mediaType")
+            prefs = ctx.deps.user_profile.media_preferences
+
+            if media_type == "movie" and not prefs.movie_quality:
+                msg = (
+                    "STOP: movie_quality not set. Ask the user: "
+                    "'Do you prefer 4K or 1080p for movies?' "
+                    "Then call set_movie_quality with their answer."
+                )
+                logger.warning(
+                    "request_media blocked by quality gate",
+                    extra={"reason": "movie_quality_not_set"}
+                )
+                return msg
+
+            if media_type == "tv" and not prefs.series_quality:
+                msg = (
+                    "STOP: series_quality not set. Ask the user: "
+                    "'Do you prefer 4K or 1080p for series?' "
+                    "Then call set_series_quality with their answer."
+                )
+                logger.warning(
+                    "request_media blocked by quality gate",
+                    extra={"reason": "series_quality_not_set"}
+                )
+                return msg
+
+        # Gate 2: confirmation required
+        if name == "request_media":
+            confirmation_mode = ctx.deps.user_profile.confirmation_mode
+            confirmed = getattr(ctx.deps, "confirmed", False)
+
+            if confirmation_mode == "always" and not confirmed:
+                msg = (
+                    "STOP: Confirmation required. Show the user exactly what "
+                    "you're about to request (title, year, quality) and call "
+                    "send_confirmation_keyboard with mediaId, mediaType, title, "
+                    "year, and quality. The user will press ✅ Yes to confirm."
+                )
+                logger.warning(
+                    "request_media blocked by confirmation gate",
+                    extra={"reason": "confirmation_required"}
+                )
+                return msg
+
+        # Pass-through
+        logger.debug("Tool call allowed", extra={"tool": name})
+        result = await self.inner_toolset.call_tool(name, tool_args, ctx, tool)
+
+        # Track in per-user AgentDeps
+        if hasattr(ctx.deps, "called_tools"):
+            ctx.deps.called_tools.add(name)
+
+        # Reset confirmed in AgentDeps after successful request_media
+        if name == "request_media" and hasattr(ctx.deps, "confirmed"):
+            ctx.deps.confirmed = False
+            logger.info("request_media succeeded, confirmed reset in AgentDeps")
+
+        return result
+```
+
+**Remove `set_confirmed()` method entirely** — no longer needed.
+
+---
+
+### 2. AgentDeps — Add confirmed, called_tools, role
+
+**File:** `src/home_agent/agent.py`
+
+```python
+from dataclasses import dataclass, field
+from telegram import Bot
+
+@dataclass
+class AgentDeps:
+    """Dependencies injected into the agent at runtime.
+
+    All fields are per-user and per-message — a fresh AgentDeps is created
+    for each incoming message in handle_message(). GuardedToolset reads state
+    from ctx.deps (this dataclass) via PydanticAI's RunContext, making the
+    GuardedToolset itself stateless and safe for concurrent multi-user access.
+    """
+    config: AppConfig
+    profile_manager: ProfileManager
+    history_manager: HistoryManager
+    user_profile: UserProfile
+    guarded_toolsets: list[Any] = field(default_factory=list)  # list[GuardedToolset]
+    telegram_bot: Bot | None = None
+    telegram_chat_id: int | None = None
+    # Per-message state (moved from GuardedToolset singleton to be user-isolated)
+    confirmed: bool = False                          # Set when user confirms via ✅ button
+    called_tools: set[str] = field(default_factory=set)  # Tools called this turn
+    role: str = "user"                               # "admin" | "user" | "read_only"
+```
+
+---
+
+### 3. bot.py — pending_confirmations dict, remove state reset loop
+
+**File:** `src/home_agent/bot.py`
+
+**Remove** the state reset loop (no longer needed):
+```python
+# REMOVE this block entirely:
+for toolset in _guarded_toolsets:
+    toolset.deps = deps
+    toolset.called_tools = set()
+    toolset.confirmed = False
+    logger.debug("Reset GuardedToolset state ...")
+```
+
+**Add** `pending_confirmations` dict to store button-press confirmations per user:
+```python
+# In create_application() — as a closure variable
+pending_confirmations: dict[int, tuple[int, str]] = {}
+# key: user_id, value: (mediaId, mediaType)
+```
+
+**In `handle_message()`** — read and consume confirmation if present:
+```python
+# After loading user_profile, before building AgentDeps:
+confirmed = False
+if user_id in pending_confirmations:
+    _media_id, _media_type = pending_confirmations.pop(user_id)
+    confirmed = True
+    logger.info(
+        "Consumed pending confirmation for user",
+        extra={"user_id": user_id, "mediaId": _media_id, "mediaType": _media_type}
+    )
+
+deps = AgentDeps(
+    config=config,
+    profile_manager=profile_manager,
+    history_manager=history_manager,
+    user_profile=user_profile,
+    guarded_toolsets=guarded_toolsets,
+    telegram_bot=context.bot,
+    telegram_chat_id=update.effective_chat.id,
+    confirmed=confirmed,           # ← from pending_confirmations or False
+    called_tools=set(),
+    role=user_profile.role,        # ← from UserProfile
+)
+```
+
+**In callback handler** — write to `pending_confirmations` instead of `toolset.set_confirmed()`:
+```python
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    data = query.data
+
+    if data and data.startswith("confirm:"):
+        _, media_id_str, media_type = data.split(":")
+        media_id = int(media_id_str)
+        # Store confirmation for this user — handle_message will consume it
+        pending_confirmations[user_id] = (media_id, media_type)
+        logger.info(
+            "Stored pending confirmation",
+            extra={"user_id": user_id, "mediaId": media_id, "mediaType": media_type}
+        )
+        await query.edit_message_text("✅ Confirmed. Requesting now...")
+        # Re-run agent with synthetic message to trigger request_media
+        await _run_agent_for_user(
+            user_id=user_id,
+            text="Confirmed. Please proceed with the request.",
+            update=update,
+            context=context,
+            ...
+        )
+
+    elif data == "cancel":
+        # No pending_confirmations entry needed — confirmed stays False
+        pending_confirmations.pop(user_id, None)
+        logger.info("Confirmation cancelled", extra={"user_id": user_id})
+        await query.edit_message_text("❌ Cancelled.")
+```
+
+---
+
+### 4. UserProfile — Add role field
+
+**File:** `src/home_agent/profile.py`
+
+```python
+from typing import Literal
+
+class UserProfile(BaseModel):
+    """User profile stored in SQLite.
+
+    Attributes:
+        telegram_id: Telegram user ID (primary key).
+        media_preferences: Media quality and format preferences.
+        confirmation_mode: Whether to confirm before requesting.
+        reply_language: Language for agent replies.
+        notes: Free-form notes about the user.
+        role: Permission level — 'admin', 'user', or 'read_only'.
+    """
+    telegram_id: int
+    media_preferences: MediaPreferences = Field(default_factory=MediaPreferences)
+    confirmation_mode: Literal["always", "never"] = "always"
+    reply_language: str = "english"
+    notes: list[str] = Field(default_factory=list)
+    role: Literal["admin", "user", "read_only"] = "user"  # NEW
+```
+
+**ProfileManager** — auto-assign admin role:
+```python
+async def get_or_create_profile(
+    self, telegram_id: int, language_code: str | None = None
+) -> UserProfile:
+    """Get or create a user profile.
+
+    Auto-assigns 'admin' role if telegram_id is in config.admin_telegram_ids.
+    Auto-detects reply_language from language_code on first creation.
+    """
+    profile = await self._load(telegram_id)
+    if profile is not None:
+        # Update role if admin list changed
+        expected_role = "admin" if telegram_id in self.config.admin_telegram_ids else profile.role
+        if profile.role != expected_role:
+            profile.role = expected_role
+            await self._save(profile)
+        return profile
+
+    # New user — create default profile
+    role = "admin" if telegram_id in self.config.admin_telegram_ids else "user"
+    reply_language = _detect_language(language_code)
+    profile = UserProfile(
+        telegram_id=telegram_id,
+        reply_language=reply_language,
+        role=role,
+    )
+    await self._save(profile)
+    return profile
+```
+
+---
+
+### 5. AppConfig — Add admin_telegram_ids
+
+**File:** `src/home_agent/config.py`
+
+```python
+class AppConfig(BaseSettings):
+    # ... existing fields ...
+    admin_telegram_ids: list[int] = Field(default=[])
+    """Telegram user IDs with admin role. Subset of allowed_telegram_ids."""
+```
+
+In `.env.example`:
+```
+# Admin Telegram user IDs (subset of ALLOWED_TELEGRAM_IDS)
+# These users get the 'admin' role and full access
+ADMIN_TELEGRAM_IDS=[123456789]
+```
+
+---
+
+### 6. Tests
+
+#### test_guarded_toolset.py — Update for stateless API
+
+All tests that previously did:
+```python
+guarded.deps = mock_deps
+guarded.confirmed = True
+result = await _call(guarded, "request_media", {...})
+```
+
+Must now use `ctx.deps`:
+```python
+ctx = MagicMock()
+ctx.deps = mock_deps  # AgentDeps with confirmed=True, user_profile with quality set
+result = await guarded.call_tool("request_media", {...}, ctx, MagicMock())
+```
+
+New tests:
+```python
+async def test_call_tool_reads_confirmed_from_ctx_deps():
+    """call_tool reads confirmed from ctx.deps, not self."""
+    guarded = GuardedToolset(mock_inner)
+    assert not hasattr(guarded, "confirmed")  # No instance attribute
+    
+    ctx = MagicMock()
+    ctx.deps.confirmed = True
+    ctx.deps.user_profile.confirmation_mode = "always"
+    ctx.deps.user_profile.media_preferences.movie_quality = "4k"
+    ctx.deps.role = "user"
+    
+    result = await guarded.call_tool("request_media", {"mediaType": "movie", "mediaId": 1}, ctx, MagicMock())
+    assert result != "STOP: Confirmation required."
+
+
+async def test_two_concurrent_users_do_not_interfere():
+    """User A's confirmed does not affect User B's gate."""
+    guarded = GuardedToolset(mock_inner)
+    
+    ctx_a = MagicMock()
+    ctx_a.deps.confirmed = True  # User A confirmed
+    ctx_a.deps.user_profile.confirmation_mode = "always"
+    ctx_a.deps.user_profile.media_preferences.movie_quality = "4k"
+    ctx_a.deps.role = "user"
+    
+    ctx_b = MagicMock()
+    ctx_b.deps.confirmed = False  # User B not confirmed
+    ctx_b.deps.user_profile.confirmation_mode = "always"
+    ctx_b.deps.user_profile.media_preferences.movie_quality = "4k"
+    ctx_b.deps.role = "user"
+    
+    # Run both concurrently
+    result_a, result_b = await asyncio.gather(
+        guarded.call_tool("request_media", {"mediaType": "movie", "mediaId": 1}, ctx_a, MagicMock()),
+        guarded.call_tool("request_media", {"mediaType": "movie", "mediaId": 2}, ctx_b, MagicMock()),
+    )
+    
+    # A succeeds, B is blocked
+    assert "STOP" not in result_a
+    assert "Confirmation required" in result_b
+
+
+async def test_read_only_user_cannot_request_media():
+    """read_only role blocked from request_media."""
+    guarded = GuardedToolset(mock_inner)
+    ctx = MagicMock()
+    ctx.deps.role = "read_only"
+    
+    result = await guarded.call_tool("request_media", {"mediaType": "movie", "mediaId": 1}, ctx, MagicMock())
+    assert "do not have permission" in result
+
+
+async def test_guarded_toolset_has_no_stateful_attributes():
+    """GuardedToolset has no deps/confirmed/called_tools attributes."""
+    guarded = GuardedToolset(mock_inner)
+    assert not hasattr(guarded, "deps")
+    assert not hasattr(guarded, "confirmed")
+    assert not hasattr(guarded, "called_tools")
+```
+
+#### test_multi_user.py — New
+
+```python
+async def test_user_a_confirmation_does_not_affect_user_b():
+    """User A pressing ✅ Yes does not unblock User B's request_media gate."""
+    # Simulate two users in parallel with shared GuardedToolset
+    # User A: confirmed=True in their AgentDeps
+    # User B: confirmed=False in their AgentDeps
+    # Verify B is still blocked
+
+async def test_user_a_quality_does_not_bleed_into_user_b():
+    """User A's 4K preference does not affect User B's quality gate."""
+    # User A: movie_quality="4k" in their profile
+    # User B: movie_quality=None in their profile
+    # User B should still be blocked by quality gate
+
+async def test_read_only_user_can_search_not_request():
+    """read_only user can call search_media but not request_media."""
+
+async def test_admin_auto_assigned_on_profile_creation():
+    """User in admin_telegram_ids gets admin role on profile creation."""
+
+async def test_normal_user_gets_user_role():
+    """User not in admin_telegram_ids gets user role."""
+
+async def test_pending_confirmations_keyed_by_user_id():
+    """Confirmation from User A does not unlock User B's request."""
+    # User A presses ✅ → pending_confirmations[A] = (123, "movie")
+    # User B's next message should NOT consume A's confirmation
+```
+
+---
+
+## Import-Linter Compliance
+
+No new contracts needed. GuardedToolset reading from `ctx.deps` is entirely within
+the mcp layer — it reads `AgentDeps` fields via duck typing (getattr), not by importing
+from the agent module.
+
+UserProfile.role is in the profile layer — no circular imports.
+
+---
+
+## Logging Output Examples
+
+With stateless GuardedToolset:
+```
+INFO: Stored pending confirmation; user_id=123 mediaId=27205 mediaType=movie
+INFO: Consumed pending confirmation for user; user_id=123 mediaId=27205 mediaType=movie
+DEBUG: Tool call allowed; tool=request_media
+INFO: request_media succeeded, confirmed reset in AgentDeps
+```
+
+Role gate block:
+```
+WARNING: request_media blocked by role gate; reason=read_only_role
+```
+
+---
+
+## Success Criteria
+
+- GuardedToolset has NO instance state beyond inner_toolset
+- Two concurrent users' state is completely isolated (asyncio.gather test proves it)
+- pending_confirmations dict correctly scopes confirmations per user_id
+- read_only users cannot request media
+- admin role auto-assigned from admin_telegram_ids config
+- All existing tests updated and passing
+- New multi-user tests prove isolation
+- verify.sh green: ty, lint-imports, pytest

@@ -554,33 +554,18 @@ async def test_confirm_request_tool_is_registered(
     assert "confirm_request" in tool_names
 
 
-async def test_confirm_request_tool_sets_confirmed_flag(
+async def test_confirm_request_tool_sets_confirmed_in_deps(
     mock_config: AppConfig, test_db: Path
 ) -> None:
-    """confirm_request tool sets .confirmed = True on real GuardedToolset instances.
+    """confirm_request tool sets deps.confirmed = True (stateless: no GuardedToolset mutation).
 
-    Uses a real GuardedToolset (not MagicMock) so PydanticAI's AbstractToolset
-    protocol is actually enforced. Verifies the real .confirmed flag flips to True
-    rather than just asserting a mock method was called.
+    GuardedToolset is now stateless — confirm_request sets ctx.deps.confirmed = True
+    in AgentDeps (created fresh per message), not a flag on the toolset singleton.
     """
-    from unittest.mock import AsyncMock, MagicMock
-
-    from home_agent.mcp.guarded_toolset import GuardedToolset
     from home_agent.profile import MediaPreferences
 
     profile_manager = ProfileManager(test_db)
     history_manager = HistoryManager(test_db)
-
-    # Real GuardedToolset wrapping a mocked inner toolset
-    inner = MagicMock()
-    inner.id = "test-server"
-    inner.__aenter__ = AsyncMock(return_value=inner)
-    inner.__aexit__ = AsyncMock(return_value=None)
-    inner.get_tools = AsyncMock(return_value={})
-    inner.call_tool = AsyncMock(return_value="mock result")
-
-    guarded_toolset = GuardedToolset(inner)  # Real instance — .confirmed is a real bool
-    assert guarded_toolset.confirmed is False  # Starts unconfirmed
 
     profile = UserProfile(
         user_id=200,
@@ -594,7 +579,9 @@ async def test_confirm_request_tool_sets_confirmed_flag(
         profile_manager=profile_manager,
         history_manager=history_manager,
         user_profile=profile,
-        guarded_toolsets=[guarded_toolset],
+        confirmed=False,
+        called_tools=set(),
+        role="user",
     )
 
     agent_instance = create_agent()
@@ -603,8 +590,8 @@ async def test_confirm_request_tool_sets_confirmed_flag(
         async with agent_instance:
             await agent_instance.run("yes, confirm it", deps=deps)
 
-    # The real .confirmed flag must be True — not a mock assertion
-    assert guarded_toolset.confirmed is True
+    # confirm_request sets deps.confirmed = True (not on any toolset)
+    assert deps.confirmed is True
 
 
 async def test_all_profile_tools_registered(
