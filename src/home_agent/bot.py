@@ -11,9 +11,10 @@ import logging
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 from telegram import Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -21,6 +22,7 @@ from telegram.ext import (
 
 from home_agent.agent import AgentDeps
 from home_agent.config import AppConfig
+from home_agent.formatting import md_to_telegram_html
 from home_agent.history import HistoryManager, convert_history_to_messages
 from home_agent.mcp.guarded_toolset import GuardedToolset
 from home_agent.profile import ProfileManager
@@ -31,14 +33,15 @@ _REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
 
 
 def _split_message(text: str, max_length: int = 4096) -> list[str]:
-    """Split a long message into chunks that fit within Telegram's message size limit.
+    """Split a long HTML message into chunks respecting tag boundaries.
 
-    Splits by newlines first, accumulating lines until a chunk would exceed
-    max_length. If a single line exceeds max_length, it is split at the boundary.
+    Splits by newline only — never inside an HTML tag — to prevent broken
+    Telegram HTML parse_mode output. If a single line exceeds max_length,
+    it is split at max_length (rare: only for extreme cases).
 
     Args:
-        text: The message text to split.
-        max_length: Maximum number of characters per chunk. Defaults to 4096.
+        text: The HTML-formatted message text to split.
+        max_length: Maximum characters per chunk. Defaults to 4096.
 
     Returns:
         A list of string chunks, each at most max_length characters.
@@ -123,7 +126,7 @@ def make_message_handler(
         user_id = update.effective_user.id
         if user_id not in config.allowed_telegram_ids:
             logger.info("Rejected unauthorized user %d", user_id)
-            await update.message.reply_text(_REJECTION_MESSAGE)
+            await update.message.reply_text(_REJECTION_MESSAGE, parse_mode=ParseMode.HTML)
             return
 
         logger.debug("Authorized user %d sent a message", user_id)
@@ -147,6 +150,8 @@ def make_message_handler(
             history_manager=history_manager,
             user_profile=user_profile,
             guarded_toolsets=_guarded_toolsets,
+            telegram_bot=context.bot,
+            telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
         )
 
         # Inject deps into each GuardedToolset so gates can access the user profile.
@@ -171,33 +176,174 @@ def make_message_handler(
             if exc.status_code == 429:
                 logger.warning("Rate limit exhausted for user %d after retries", user_id)
                 await update.message.reply_text(
-                    "⏳ The AI service is temporarily busy. Please try again in a moment."
+                    "⏳ The AI service is temporarily busy. Please try again in a moment.",
+                    parse_mode=ParseMode.HTML,
                 )
             else:
                 logger.error("Model HTTP error for user %d: %s", user_id, exc, exc_info=True)
                 await update.message.reply_text(
-                    "Sorry, something went wrong processing your request."
+                    "Sorry, something went wrong processing your request.",
+                    parse_mode=ParseMode.HTML,
                 )
             return
         except Exception as exc:
             logger.error("Agent.run() failed for user %d: %s", user_id, exc, exc_info=True)
-            await update.message.reply_text("Sorry, something went wrong processing your request.")
+            await update.message.reply_text(
+                "Sorry, something went wrong processing your request.",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
         if not reply:
             logger.warning("Agent returned empty output for user %d", user_id)
-            await update.message.reply_text("I completed the action but had no message to send back.")
+            await update.message.reply_text(
+                "I completed the action but had no message to send back.",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
         # Persist both turns
         await history_manager.save_message(user_id=user_id, role="user", content=text)
         await history_manager.save_message(user_id=user_id, role="assistant", content=reply)
 
-        for chunk in _split_message(reply):
-            await update.message.reply_text(chunk)
+        html_reply = md_to_telegram_html(reply)
+        for chunk in _split_message(html_reply):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
         logger.debug("Sent agent reply to user %d", user_id)
 
     return handle_message
+
+
+def make_callback_handler(
+    config: AppConfig,
+    guarded_toolsets: list[GuardedToolset],
+    agent: Agent[AgentDeps, str],
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+):
+    """Create a Telegram CallbackQueryHandler for inline keyboard button presses.
+
+    Handles callback data in the format 'confirm:{mediaId}:{mediaType}' and 'cancel'.
+    On confirm: sets GuardedToolset.confirmed=True and re-runs the agent with a
+    synthetic message to complete the request. On cancel: resets confirmed=False
+    and sends a cancellation message.
+
+    Args:
+        config: Application configuration for the allowed user whitelist.
+        guarded_toolsets: List of GuardedToolset instances to set confirmed on.
+        agent: The PydanticAI agent instance to re-run on confirmation.
+        profile_manager: Manages user profile persistence.
+        history_manager: Manages conversation history persistence.
+
+    Returns:
+        An async handler coroutine compatible with python-telegram-bot.
+    """
+
+    async def handle_callback(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle an inline keyboard callback query.
+
+        Args:
+            update: The incoming Telegram update containing the callback query.
+            context: The callback context provided by python-telegram-bot.
+        """
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()  # Always answer to remove loading spinner
+
+        if update.effective_user is None:
+            return
+
+        user_id = update.effective_user.id
+        if user_id not in config.allowed_telegram_ids:
+            await query.edit_message_text("Not authorized.")
+            return
+
+        data = query.data  # e.g. "confirm:27205:movie" or "cancel"
+
+        if data and data.startswith("confirm:"):
+            parts = data.split(":")
+            if len(parts) != 3:  # noqa: PLR2004
+                logger.warning("Invalid confirm callback data: %s", data)
+                return
+            _, media_id_str, media_type = parts
+            try:
+                media_id = int(media_id_str)
+            except ValueError:
+                logger.warning("Invalid mediaId in callback data: %s", media_id_str)
+                return
+
+            for toolset in guarded_toolsets:
+                toolset.set_confirmed(media_id, media_type)
+
+            await query.edit_message_text(
+                "✅ Confirmed. Requesting now...",
+                parse_mode=ParseMode.HTML,
+            )
+
+            # Re-run agent with a synthetic "yes confirmed" message so it calls
+            # request_media now that the confirmation gate is unblocked.
+            language_code = update.effective_user.language_code
+            user_profile = await profile_manager.get(user_id, language_code=language_code)
+            raw_history = await history_manager.get_history(user_id=user_id)
+            message_history = convert_history_to_messages(raw_history)
+
+            deps = AgentDeps(
+                config=config,
+                profile_manager=profile_manager,
+                history_manager=history_manager,
+                user_profile=user_profile,
+                guarded_toolsets=guarded_toolsets,
+                telegram_bot=context.bot,
+                telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
+            )
+            # Inject deps but do NOT reset confirmed — the flag was just set above
+            for toolset in guarded_toolsets:
+                toolset.deps = deps
+                toolset.called_tools = set()
+
+            try:
+                result = await agent.run(
+                    "confirmed, please proceed with the request",
+                    deps=deps,
+                    message_history=message_history,
+                )
+                reply = result.output
+                if reply:
+                    await history_manager.save_message(
+                        user_id=user_id, role="assistant", content=reply
+                    )
+                    html_reply = md_to_telegram_html(reply)
+                    if update.effective_chat:
+                        for chunk in _split_message(html_reply):
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text=chunk,
+                                parse_mode=ParseMode.HTML,
+                            )
+            except Exception as exc:
+                logger.error(
+                    "Agent re-run after confirm failed for user %d: %s",
+                    user_id,
+                    exc,
+                    exc_info=True,
+                )
+                if update.effective_chat:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="Sorry, something went wrong processing your request.",
+                        parse_mode=ParseMode.HTML,
+                    )
+
+        elif data == "cancel":
+            for toolset in guarded_toolsets:
+                toolset.confirmed = False
+            await query.edit_message_text("❌ Cancelled.")
+            logger.info("User %d cancelled the media request", user_id)
+
+    return handle_callback
 
 
 def create_application(
@@ -222,10 +368,15 @@ def create_application(
     Returns:
         A fully configured :class:`telegram.ext.Application` instance.
     """
+    _guarded_toolsets = guarded_toolsets or []
     token = config.telegram_bot_token.get_secret_value()
     app: Application = Application.builder().token(token).build()
-    handler = make_message_handler(config, profile_manager, history_manager, agent, guarded_toolsets)
+    handler = make_message_handler(config, profile_manager, history_manager, agent, _guarded_toolsets)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
+    callback_handler = make_callback_handler(
+        config, _guarded_toolsets, agent, profile_manager, history_manager
+    )
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(_error_handler)
     logger.info("Telegram application configured with whitelist: %s", config.allowed_telegram_ids)
     return app

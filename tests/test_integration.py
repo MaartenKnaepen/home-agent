@@ -87,7 +87,10 @@ async def test_message_flow_persists_history(
     update = make_update("Hello", user_id=12345)
     await handler(update, MagicMock())
 
-    update.message.reply_text.assert_called_once_with("Hello there!")
+    update.message.reply_text.assert_called_once()
+    call_kwargs = update.message.reply_text.call_args
+    # The agent output is converted via md_to_telegram_html before sending
+    assert "Hello there!" in call_kwargs[0][0]
 
     history = await history_manager.get_history(user_id=12345)
     assert len(history) == 2

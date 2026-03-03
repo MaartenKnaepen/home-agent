@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai import Agent, RunContext
+from telegram import Bot
 
 from home_agent.config import AppConfig
 from home_agent.history import HistoryManager, sliding_window_processor
@@ -23,6 +24,7 @@ from home_agent.tools.profile_tools import (
     set_reply_language,
     set_series_quality,
 )
+from home_agent.tools.telegram_tools import send_confirmation_keyboard, send_poster_image
 
 if TYPE_CHECKING:
     from home_agent.mcp.guarded_toolset import GuardedToolset
@@ -41,6 +43,10 @@ class AgentDeps:
         user_profile: The current user's profile.
         guarded_toolsets: GuardedToolset instances wrapping MCP toolsets.
             The confirm_request tool sets the confirmed flag on each of these.
+        telegram_bot: Telegram Bot instance for sending messages/photos.
+            Set by bot.py before each agent.run() call. None in tests.
+        telegram_chat_id: Telegram chat ID for sending messages.
+            Set by bot.py before each agent.run() call. None in tests.
     """
 
     config: AppConfig
@@ -48,6 +54,8 @@ class AgentDeps:
     history_manager: HistoryManager
     user_profile: UserProfile
     guarded_toolsets: list[GuardedToolset] = field(default_factory=list)
+    telegram_bot: Bot | None = None
+    telegram_chat_id: int | None = None
 
 
 def create_agent(
@@ -165,6 +173,10 @@ def create_agent(
     agent_instance.tool(set_reply_language)
     agent_instance.tool(set_confirmation_mode)
     agent_instance.tool(confirm_request)
+
+    # Register Telegram rich UX tools
+    agent_instance.tool(send_confirmation_keyboard)
+    agent_instance.tool(send_poster_image)
 
     return agent_instance
 

@@ -729,117 +729,134 @@ phases:
       - test_guarded_toolset.py — all edge cases covered including confirm_request\
       \ mediaId mismatch\n- test_guarded_toolset.py — logging assertions verify correct\
       \ log levels and messages\n- memory.yaml and api.yaml updated\n"
-- focus: Rich Telegram UX, proactive behavior, multi-user, and extended capabilities.
+- focus: Rich Telegram UX, voice support, and multi-user capabilities.
   id: 4
   name: Polish & Advanced Features
   steps:
   - files:
+    - src/home_agent/formatting.py
+    - src/home_agent/bot.py
     - src/home_agent/tools/telegram_tools.py
-    goal: Responses use inline keyboards, images, and formatted text.
+    - tests/test_formatting.py
+    - tests/test_telegram_tools.py
+    goal: Responses are beautifully formatted with HTML, inline keyboards for confirmation,
+      and movie poster images fetched from TMDB CDN.
     id: '4.1'
     name: Rich Telegram Formatting
-    notes: ''
-    scope: '- Agent tool to send inline keyboard buttons (e.g., confirm/deny)
-
-      - Agent tool to send images (movie posters fetched from TMDB/Jellyseerr)
-
-      - Markdown formatting for structured responses
-
-      '
+    detailed_plan: docs/LLM/plans/step-4.1.rovo-plan.yaml
+    notes: 'markdown-it-py (already a transitive dependency, v4.0.0) is used to parse
+      LLM Markdown output and render it as Telegram-safe HTML. No external library
+      needed. Bot passes parse_mode=ParseMode.HTML to all reply_text() calls. A small
+      formatting.py module (~60 lines) owns the renderer and is independently testable.
+      Inline keyboard wires confirm_request tool to a "✅ Yes" button — in Phase 3
+      confirm_request was called by the LLM as a text tool; in Phase 4 it is triggered
+      by a button press in bot.py. Movie poster images: get_media_details returns a
+      posterPath like /abc123.jpg (TMDB partial path); bot constructs full TMDB CDN
+      URL (https://image.tmdb.org/t/p/w500{posterPath}) and calls send_photo() —
+      Telegram downloads directly from TMDB CDN (public URL). Seerr proxy URLs must
+      NOT be used as they are not publicly reachable.'
+    scope: "- src/home_agent/formatting.py: md_to_telegram_html(text: str) -> str\n\
+      \  - Uses markdown-it-py token stream (no regex)\n  - Handles: **bold** → <b>,\
+      \ *italic* → <i>, `code` → <code>, ```block``` → <pre><code>,\n    # Header\
+      \ → <b>, - list item → • item, [text](url) → <a href>\n  - Unknown/unsupported\
+      \ nodes fall back to plain text\n  - Escapes raw & < > in plain text portions\
+      \ to prevent Telegram parse errors\n  - Falls back to plain text if conversion\
+      \ raises (no silent failures)\n- bot.py: all reply_text() calls updated to use\
+      \ parse_mode=ParseMode.HTML and pass\n  text through md_to_telegram_html()\n\
+      - bot.py: message splitter (_split_message) updated to be HTML-aware (don't\n\
+      \  split inside an open tag)\n- src/home_agent/tools/telegram_tools.py: send_confirmation_keyboard()\n\
+      \  — sends a message with InlineKeyboardMarkup containing '✅ Yes' and '❌ No'\
+      \ buttons.\n  Pressing '✅ Yes' triggers confirm_request in bot.py callback handler\
+      \ (no LLM call needed).\n  Pressing '❌ No' sends a cancellation message and\
+      \ resets GuardedToolset.confirmed.\n- src/home_agent/tools/telegram_tools.py:\
+      \ send_poster_image()\n  — accepts posterPath (TMDB partial path, e.g. /abc123.jpg),\
+      \ constructs\n  https://image.tmdb.org/t/p/w500{posterPath}, calls bot.send_photo(url).\n\
+      \  Falls back to text if posterPath is None or send_photo fails.\n- bot.py: register\
+      \ callback_query_handler for inline keyboard button presses\n- bot.py: on '✅\
+      \ Yes' press, call confirm_request on the GuardedToolset and resume agent.run()\n\
+      - bot.py: on '❌ No' press, reset confirmed=False and send cancellation message\n"
     status: pending
-    test: '- test_telegram_tools.py — Inline keyboard tool produces correct Telegram
-      markup
-
-      - Image tool fetches and sends a photo message
-
-      - Markdown output is valid Telegram MarkdownV2
-
-      '
-  - files:
-    - src/home_agent/notifications.py
-    goal: Bot notifies user when downloads complete or issues arise.
-    id: '4.2'
+    test: "- test_formatting.py — md_to_telegram_html converts **bold** to <b>bold</b>\n\
+      - test_formatting.py — *italic* converts to <i>italic</i>\n- test_formatting.py\
+      \ — `code` converts to <code>code</code>\n- test_formatting.py — code block\
+      \ converts to <pre><code>\n- test_formatting.py — # Header converts to <b>Header</b>\n\
+      - test_formatting.py — list items convert to bullet points\n- test_formatting.py\
+      \ — raw & < > in plain text are escaped\n- test_formatting.py — unknown nodes\
+      \ fall back to plain text\n- test_formatting.py — malformed input falls back\
+      \ gracefully\n- test_telegram_tools.py — send_confirmation_keyboard sends InlineKeyboardMarkup\
+      \ with Yes/No buttons\n- test_telegram_tools.py — send_poster_image constructs\
+      \ correct TMDB CDN URL from posterPath\n- test_telegram_tools.py — send_poster_image\
+      \ falls back to text if posterPath is None\n- test_bot.py — callback_query_handler\
+      \ registered for inline keyboard presses\n- test_bot.py — '✅ Yes' button press\
+      \ calls confirm_request on GuardedToolset\n- test_bot.py — '❌ No' button press\
+      \ resets confirmed=False and sends cancellation\n- test_bot.py — all reply_text\
+      \ calls use parse_mode=ParseMode.HTML\n"
+  - id: '4.2'
     name: Proactive Notifications
-    notes: ''
-    scope: '- Periodic poller (or Jellyseerr webhook receiver) that checks for completed
-      downloads
-
-      - Pushes notification to user via Telegram
-
-      - Respects quiet_hours from user profile
-
-      '
-    status: pending
-    test: '- test_notifications.py — Completed download triggers a Telegram message
-
-      - Notification suppressed during quiet hours
-
-      - Duplicate notifications are not sent
-
-      '
+    status: removed
+    notes: 'REMOVED: Seerr has its own built-in notification system that pushes directly
+      to Telegram via webhooks. No custom poller or webhook receiver needed in the bot.
+      Configure Seerr notifications in Seerr settings instead.'
   - files:
     - src/home_agent/profile.py
     - src/home_agent/bot.py
+    - tests/test_multi_user.py
     goal: Multiple users with separate profiles and permission levels.
     id: '4.3'
     name: Multi-User Support
     notes: ''
-    scope: '- Per-user profile isolation
+    scope: '- Per-user profile isolation (already implemented via telegram_id in UserProfile)
 
-      - Permission levels (admin, user, read-only)
+      - Permission levels: admin, user, read-only — stored in UserProfile
 
-      - Admin can manage other users'' permissions via chat
+      - Admin can manage other users'' permissions via chat command
+
+      - Admin user ID configured in AppConfig (ADMIN_TELEGRAM_ID)
 
       '
     status: pending
-    test: '- test_multi_user.py — Two users have separate profiles and histories
+    test: '- test_multi_user.py — Two users have separate profiles and conversation histories
 
-      - Read-only user can search but not request
+      - Read-only user can search but not request media
 
-      - Admin can modify permissions
+      - Admin can view and modify other users'' permissions
 
       '
   - files:
+    - deployment/docker-compose.yml
     - src/home_agent/bot.py
-    goal: User sends voice message, agent processes it as text.
+    - tests/test_voice.py
+    goal: User sends voice message; Qwen3-ASR-1.7B transcribes it locally on CPU;
+      transcribed text is fed to the agent as a normal message.
     id: '4.4'
     name: Voice Message Support
-    notes: ''
-    scope: '- Voice message handler that downloads audio
-
-      - Transcription via Whisper (local or API)
-
-      - Transcribed text fed to agent as normal message
-
-      '
+    detailed_plan: docs/LLM/plans/step-4.4.rovo-plan.yaml
+    notes: 'Qwen3-ASR-1.7B chosen for CPU deployment on home server (Core i3). Model
+      is ~1.7B parameters, runs on CPU with reasonable latency (~2-5s for short voice
+      messages). Deployed as a Docker sidecar container exposing a simple HTTP transcription
+      API. Bot downloads the OGG voice file from Telegram, sends to ASR container
+      as HTTP POST, receives transcribed text, feeds to agent. Model reference:
+      https://huggingface.co/Qwen/Qwen3-ASR-1.7B. Runs on CPU (no GPU required).
+      Audio format: Telegram sends voice as OGG/Opus — may need ffmpeg conversion
+      to WAV/MP3 depending on what Qwen3-ASR accepts. This needs investigation during
+      implementation.'
+    scope: "- deployment/docker-compose.yml: add qwen3-asr sidecar service\n  - Builds\
+      \ from a local Dockerfile in mcp_servers/qwen3_asr/ or uses a community image\n\
+      \  - CPU-only (no GPU), exposes port 8086\n  - Mounts model cache volume for\
+      \ persistence across restarts\n  - ASR_MODEL=Qwen/Qwen3-ASR-1.7B env var\n\
+      - ASR_URL added to AppConfig (default: http://qwen3-asr:8086)\n- bot.py: voice_message_handler()\n\
+      \  - Downloads OGG voice file from Telegram\n  - POSTs audio bytes to ASR container\
+      \ HTTP API\n  - Receives transcribed text\n  - Forwards to handle_message() as\
+      \ if it were a text message\n  - On ASR failure: sends user-friendly error message\n\
+      - Investigate: does Qwen3-ASR accept OGG/Opus directly or need WAV conversion?\n\
+      \  If conversion needed: use ffmpeg in the ASR container, not in bot.py\n- Typing\
+      \ indicator shown while transcription is in progress\n"
     status: pending
-    test: '- test_voice.py — Voice message handler extracts audio file
-
-      - Transcription produces text
-
-      - Agent receives transcribed text and responds normally
-
-      '
-  - files: []
-    goal: File conversion capabilities via natural language.
-    id: '4.5'
-    name: IT Tools / BentoPDF / Vert Integration
-    notes: ''
-    scope: '- Find existing MCP servers
-
-      - Tools needed: convert_file(input_path, output_format), list_supported_formats()
-
-      - Agent can receive a file via Telegram, convert it, and send back the result
-
-      '
-    status: pending
-    test: '- test_conversion_mcp.py — Supported formats list is returned
-
-      - Conversion request sends correct payload
-
-      - Agent handles unsupported format gracefully with a helpful message
-
-      '
+    test: "- test_voice.py — voice_message_handler downloads OGG file from Telegram\n\
+      - test_voice.py — audio bytes POSTed to ASR_URL\n- test_voice.py — transcribed\
+      \ text forwarded to handle_message()\n- test_voice.py — ASR failure sends user-friendly\
+      \ error message\n- test_voice.py — typing indicator shown during transcription\n\
+      - test_docker.py — docker-compose has qwen3-asr service with correct env vars\n"
 - focus: Add system monitoring via Glances MCP server.
   id: 5
   name: Glances Integration

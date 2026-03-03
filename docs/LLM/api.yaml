@@ -378,7 +378,54 @@ modules:
       - name: "confirm_request"
         type: "function (@agent.tool)"
         signature: "(ctx: RunContext[AgentDeps], mediaId: int, mediaType: str) -> str"
-        description: "Agent-callable tool to set the confirmed flag on GuardedToolset instances. Call after the user approves a media request. In Phase 4, this will be triggered by an inline keyboard button press instead of text 'yes'. Takes mediaId and mediaType for audit trail. Returns confirmation string. Logs at INFO level."
+        description: "Agent-callable tool to set the confirmed flag on GuardedToolset instances. DEPRECATED for direct use in Phase 4+ — agent now calls send_confirmation_keyboard() which shows inline buttons; the bot callback handler calls GuardedToolset.set_confirmed() directly. confirm_request remains registered for backward compatibility."
+
+  # ── src/home_agent/formatting.py ─────────────────────────────────────────────
+  - module: "src/home_agent/formatting.py"
+    exports:
+      - name: "md_to_telegram_html"
+        type: "function"
+        signature: "(text: str) -> str"
+        description: "Convert Markdown text to Telegram-safe HTML using markdown-it-py token stream. Handles bold, italic, inline code, fenced code blocks, headers, lists, and links. All plain text portions are html.escape()d to prevent parse errors. Unknown/unsupported Markdown nodes (tables, images) fall back to plain text. Falls back to html.escape(text) if any exception occurs. Thread-safe (module-level MarkdownIt singleton, no state)."
+
+  # ── src/home_agent/tools/telegram_tools.py ───────────────────────────────────
+  - module: "src/home_agent/tools/telegram_tools.py"
+    exports:
+      - name: "send_confirmation_keyboard"
+        type: "function (@agent.tool)"
+        signature: "(ctx: RunContext[AgentDeps], mediaId: int, mediaType: str, title: str, year: int | None, quality: str) -> str"
+        description: "Send an InlineKeyboardMarkup to the user with ✅ Yes and ❌ No buttons. Callback data: 'confirm:{mediaId}:{mediaType}' for Yes, 'cancel' for No. Uses ctx.deps.telegram_bot and ctx.deps.telegram_chat_id. Logs at INFO level. Agent should call this instead of asking for text confirmation."
+
+      - name: "send_poster_image"
+        type: "function (@agent.tool)"
+        signature: "(ctx: RunContext[AgentDeps], posterPath: str | None, caption: str | None = None) -> str"
+        description: "Send a movie/TV poster image to the user via Telegram. Constructs the full TMDB CDN URL from the partial posterPath (e.g. '/abc123.jpg') returned by get_media_details: https://image.tmdb.org/t/p/w500{posterPath}. Telegram downloads directly from TMDB CDN (publicly reachable). Falls back to text if posterPath is None/empty or send_photo raises. IMPORTANT: never use Seerr proxy URLs — they are not publicly reachable by Telegram servers."
+
+      - name: "TMDB_IMAGE_BASE"
+        type: "constant"
+        signature: "str"
+        description: "Base URL for TMDB CDN poster images: 'https://image.tmdb.org/t/p/w500'. Append posterPath from get_media_details to form full URL."
+
+  # ── Callback Handler ──────────────────────────────────────────────────────────
+  - module: "src/home_agent/bot.py (callback handler)"
+    exports:
+      - name: "make_callback_handler"
+        type: "function"
+        signature: "(config: AppConfig, guarded_toolsets: list[GuardedToolset], agent: Agent, profile_manager: ProfileManager, history_manager: HistoryManager) -> Callable"
+        description: "Creates the CallbackQueryHandler for inline keyboard button presses. 'confirm:{mediaId}:{mediaType}' → calls GuardedToolset.set_confirmed(mediaId, mediaType) on all toolsets, edits message to show confirmation accepted, re-runs agent with synthetic 'confirmed please proceed' message. 'cancel' → resets confirmed=False on all toolsets, edits message to show cancellation. Unauthorized users get rejection without processing."
+
+  # ── AgentDeps additions ────────────────────────────────────────────────────────
+  - module: "src/home_agent/agent.py (AgentDeps additions)"
+    exports:
+      - name: "AgentDeps.telegram_bot"
+        type: "dataclass field"
+        signature: "Bot | None = None"
+        description: "Telegram Bot instance for tools that need to send messages directly (send_confirmation_keyboard, send_poster_image). Set by bot.py before each agent.run() call from context.bot."
+
+      - name: "AgentDeps.telegram_chat_id"
+        type: "dataclass field"
+        signature: "int | None = None"
+        description: "Current Telegram chat ID for tools that send messages directly. Set by bot.py before each agent.run() from update.effective_chat.id."
 
   # ── Composition & Wiring ─────────────────────────────────────────────────────
   - module: "src/home_agent/main.py"

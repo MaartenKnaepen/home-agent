@@ -1,0 +1,569 @@
+---
+step: 4.1
+title: Rich Telegram Formatting
+goal: >
+  Replace plain text Telegram replies with beautifully formatted HTML output.
+  Wire an inline keyboard for the confirmation flow (✅ Yes / ❌ No buttons).
+  Show movie poster images at confirmation time using TMDB CDN URLs.
+
+approach: |
+  Three independent sub-tasks that can be implemented in sequence:
+
+  1. formatting.py — Markdown → Telegram HTML converter using markdown-it-py
+     token stream (already a transitive dependency). Owns the conversion logic
+     completely; independently testable. bot.py imports and applies it.
+
+  2. Inline keyboard — At confirmation time the agent calls a new
+     send_confirmation_keyboard() @agent.tool instead of just asking in plain text.
+     bot.py registers a CallbackQueryHandler; pressing ✅ Yes triggers
+     confirm_request on the GuardedToolset directly (no LLM call needed).
+     Pressing ❌ No resets confirmed=False and sends a cancellation message.
+
+  3. Poster images — After confirmation is accepted, agent calls send_poster_image()
+     with the posterPath from get_media_details. Bot constructs the full TMDB CDN
+     URL and calls send_photo(). Telegram downloads directly from TMDB (public URL).
+     Seerr's own proxy URL (http://seerr:8085/imageproxy/...) must NOT be used —
+     it is not publicly reachable by Telegram's servers.
+
+---
+
+## Key Files
+
+### New Files
+- `src/home_agent/formatting.py` — `md_to_telegram_html(text: str) -> str`
+- `tests/test_formatting.py` — Unit tests for the Markdown → HTML converter
+
+### Modified Files
+- `src/home_agent/bot.py` — Add `parse_mode=ParseMode.HTML`, callback handler,
+  HTML-aware `_split_message`, `send_poster_image` sender
+- `src/home_agent/tools/telegram_tools.py` — Add `send_confirmation_keyboard()`,
+  `send_poster_image()` @agent.tools
+- `src/home_agent/agent.py` — Register new telegram tools
+- `src/home_agent/prompts.py` — Update system prompt: replace "call confirm_request"
+  with "call send_confirmation_keyboard" at step 4
+- `tests/test_bot.py` — Callback handler tests
+- `tests/test_telegram_tools.py` — New tool tests
+
+---
+
+## Step-by-Step Implementation
+
+### 1. src/home_agent/formatting.py
+
+Create a standalone module that converts Markdown to Telegram-safe HTML using
+markdown-it-py's token stream. Do NOT use regex — walk the token tree.
+
+```python
+"""Markdown to Telegram HTML conversion.
+
+Converts LLM Markdown output to the limited HTML subset supported by Telegram.
+Uses markdown-it-py token stream for reliable parsing (no regex).
+
+Telegram-supported HTML tags:
+  <b>, <i>, <u>, <s>, <code>, <pre>, <a href>, <tg-spoiler>, <blockquote>
+
+Unsupported nodes (tables, images, HR) are rendered as plain text fallbacks.
+"""
+
+from __future__ import annotations
+import html
+import logging
+from markdown_it import MarkdownIt
+
+logger = logging.getLogger(__name__)
+
+_md = MarkdownIt()
+
+
+def md_to_telegram_html(text: str) -> str:
+    """Convert Markdown text to Telegram-safe HTML.
+
+    Parses the Markdown using markdown-it-py's token stream and emits only
+    HTML tags supported by Telegram. Unknown nodes fall back to plain text.
+    Raw & < > in plain text portions are HTML-escaped to prevent parse errors.
+
+    Args:
+        text: Markdown-formatted text from the LLM.
+
+    Returns:
+        HTML string safe to pass to Telegram with parse_mode=ParseMode.HTML.
+        Falls back to html.escape(text) if conversion raises unexpectedly.
+    """
+    try:
+        tokens = _md.parse(text)
+        return _render_tokens(tokens)
+    except Exception:
+        logger.exception("md_to_telegram_html failed, falling back to plain text")
+        return html.escape(text)
+
+
+def _render_tokens(tokens) -> str:
+    """Walk a markdown-it-py token list and emit Telegram HTML.
+
+    Args:
+        tokens: List of Token objects from markdown-it-py.
+
+    Returns:
+        Rendered HTML string.
+    """
+    out: list[str] = []
+    for token in tokens:
+        _render_token(token, out)
+    return "".join(out)
+
+
+def _render_token(token, out: list[str]) -> None:
+    t = token.type
+
+    if t == "inline" and token.children:
+        for child in token.children:
+            _render_token(child, out)
+
+    elif t == "paragraph_open":
+        pass  # No <p> in Telegram; content follows inline
+
+    elif t == "paragraph_close":
+        out.append("\n")
+
+    elif t in ("bullet_list_open", "ordered_list_open"):
+        pass
+
+    elif t in ("bullet_list_close", "ordered_list_close"):
+        out.append("\n")
+
+    elif t == "list_item_open":
+        out.append("• ")
+
+    elif t == "list_item_close":
+        out.append("\n")
+
+    elif t in ("heading_open",):
+        out.append("<b>")
+
+    elif t in ("heading_close",):
+        out.append("</b>\n")
+
+    elif t == "strong_open":
+        out.append("<b>")
+
+    elif t == "strong_close":
+        out.append("</b>")
+
+    elif t == "em_open":
+        out.append("<i>")
+
+    elif t == "em_close":
+        out.append("</i>")
+
+    elif t == "s_open":
+        out.append("<s>")
+
+    elif t == "s_close":
+        out.append("</s>")
+
+    elif t == "code_inline":
+        out.append(f"<code>{html.escape(token.content)}</code>")
+
+    elif t == "fence":
+        lang = token.info.strip() if token.info else ""
+        if lang:
+            out.append(f'<pre><code class="{html.escape(lang)}">'
+                       f'{html.escape(token.content)}</code></pre>\n')
+        else:
+            out.append(f"<pre>{html.escape(token.content)}</pre>\n")
+
+    elif t == "code_block":
+        out.append(f"<pre>{html.escape(token.content)}</pre>\n")
+
+    elif t == "link_open":
+        href = ""
+        for attr in (token.attrs or []):
+            if attr[0] == "href":
+                href = html.escape(attr[1])
+        out.append(f'<a href="{href}">')
+
+    elif t == "link_close":
+        out.append("</a>")
+
+    elif t == "softbreak":
+        out.append("\n")
+
+    elif t == "hardbreak":
+        out.append("\n")
+
+    elif t == "hr":
+        out.append("──────────\n")
+
+    elif t == "text":
+        out.append(html.escape(token.content))
+
+    elif t == "html_inline":
+        # Pass through only safe Telegram tags, escape everything else
+        safe = {"<b>", "</b>", "<i>", "</i>", "<u>", "</u>",
+                "<s>", "</s>", "<code>", "</code>"}
+        if token.content.strip() in safe:
+            out.append(token.content)
+        else:
+            out.append(html.escape(token.content))
+
+    elif t in ("paragraph_open", "paragraph_close", "blockquote_open",
+               "blockquote_close", "html_block"):
+        if t == "blockquote_open":
+            out.append("<blockquote>")
+        elif t == "blockquote_close":
+            out.append("</blockquote>\n")
+
+    # All other token types (images, tables, etc.) are silently skipped
+    # (they fall through to no output — plain text approach)
+
+    elif token.children:
+        for child in token.children:
+            _render_token(child, out)
+```
+
+**Design notes:**
+- `_md` is a module-level singleton — thread-safe for reads, no state
+- `html.escape()` is applied to ALL plain text content — prevents Telegram parse errors
+- Code blocks use `<pre><code>` (language class is optional but Telegram ignores it)
+- Unknown token types with children recurse; without children are silently skipped
+- Top-level fallback: if ANY exception occurs, return `html.escape(text)`
+
+---
+
+### 2. bot.py — Apply HTML formatting to all replies
+
+**Add `parse_mode=ParseMode.HTML` to every `reply_text()` call:**
+
+```python
+from telegram.constants import ParseMode
+from home_agent.formatting import md_to_telegram_html
+
+# In handle_message, replace:
+for chunk in _split_message(reply):
+    await update.message.reply_text(chunk)
+
+# With:
+html_reply = md_to_telegram_html(reply)
+for chunk in _split_message(html_reply):
+    await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+```
+
+**Also apply to error/rejection messages:**
+```python
+await update.message.reply_text(
+    "⏳ The AI service is temporarily busy. Please try again in a moment.",
+    parse_mode=ParseMode.HTML,
+)
+```
+
+**Update `_split_message` to be HTML-aware:**
+
+The current splitter splits at arbitrary character boundaries which could split an HTML tag like `<b>some ve` | `ry long text</b>`. Fix: only split at `\n` boundaries (never mid-tag), and ensure chunks never break inside an open HTML tag.
+
+```python
+def _split_message(text: str, max_length: int = 4096) -> list[str]:
+    """Split a long message into chunks respecting HTML tag boundaries.
+
+    Splits by newline only — never inside an HTML tag — to prevent broken
+    Telegram HTML parse_mode output. If a single line exceeds max_length,
+    it is split at max_length (rare: only for extreme cases).
+
+    Args:
+        text: The HTML-formatted message text to split.
+        max_length: Maximum characters per chunk. Defaults to 4096.
+
+    Returns:
+        A list of string chunks, each at most max_length characters.
+    """
+    # Implementation: split by \n, accumulate lines, flush at max_length
+    # Check that we're not mid-tag by verifying open < count == close > count
+```
+
+**Register CallbackQueryHandler for inline keyboard:**
+
+```python
+from telegram.ext import CallbackQueryHandler
+
+# In create_application(), after MessageHandler:
+app.add_handler(CallbackQueryHandler(make_callback_handler(...)))
+```
+
+**Callback handler:**
+```python
+def make_callback_handler(
+    config: AppConfig,
+    guarded_toolsets: list[GuardedToolset],
+    agent: Agent,
+    ...
+):
+    async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        await query.answer()  # Always answer to remove loading spinner
+
+        user_id = update.effective_user.id
+        if user_id not in config.allowed_telegram_ids:
+            await query.edit_message_text("Not authorized.")
+            return
+
+        data = query.data  # e.g. "confirm:27205:movie" or "cancel"
+
+        if data and data.startswith("confirm:"):
+            _, media_id_str, media_type = data.split(":")
+            media_id = int(media_id_str)
+            for toolset in guarded_toolsets:
+                toolset.set_confirmed(media_id, media_type)
+            # Edit the keyboard message to show confirmation accepted
+            await query.edit_message_text(
+                f"✅ Confirmed. Requesting now...",
+                parse_mode=ParseMode.HTML,
+            )
+            # Resume: run agent again with a synthetic "yes confirmed" message
+            # so it calls request_media now that the gate is unblocked
+            # ... (see design note below)
+
+        elif data == "cancel":
+            for toolset in guarded_toolsets:
+                toolset.confirmed = False
+            await query.edit_message_text("❌ Cancelled.")
+    return handle_callback
+```
+
+**Design note on "resume after button press":**
+After pressing ✅, the confirmed flag is set. But we need the agent to actually call `request_media` now. Two options:
+1. **Re-run agent** with a synthetic message like `"Yes, confirmed. Please proceed."` — agent sees confirmed flag is set and calls request_media. Simple, works with current architecture.
+2. **Store pending request context** (mediaId, mediaType, is4k) in `GuardedToolset` and call request_media directly from the callback handler without re-running agent.
+
+**Recommendation: Option 1 (re-run agent)** — simpler, uses existing flow. The agent is instructed to "proceed with the request" and since confirmed=True, the guard passes.
+
+**Callback data format:** `confirm:{mediaId}:{mediaType}` and `cancel`
+- Max callback data is 64 bytes — `confirm:1234567:movie` is 22 bytes ✅
+
+---
+
+### 3. telegram_tools.py — New @agent.tools
+
+```python
+"""Telegram-specific agent tools for rich UX.
+
+Provides tools for sending inline keyboards and poster images from the agent.
+These tools are one-way: they send a Telegram message and return a string
+confirmation to the agent.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+
+if TYPE_CHECKING:
+    from home_agent.agent import AgentDeps
+
+from pydantic_ai import RunContext
+
+logger = logging.getLogger(__name__)
+
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+
+
+async def send_confirmation_keyboard(
+    ctx: RunContext[AgentDeps],
+    mediaId: int,
+    mediaType: str,
+    title: str,
+    year: int | None,
+    quality: str,
+) -> str:
+    """Send an inline keyboard asking the user to confirm a media request.
+
+    Call this instead of asking for confirmation in plain text. The user's
+    button press will directly trigger the request without another LLM call.
+
+    Args:
+        ctx: Runtime context with dependencies.
+        mediaId: TMDB ID of the media to request.
+        mediaType: "movie" or "tv".
+        title: Human-readable title to show in the confirmation message.
+        year: Release year to show in the confirmation message. None if unknown.
+        quality: Quality string to show (e.g. "4K", "1080p").
+
+    Returns:
+        Confirmation that the keyboard was sent.
+    """
+    year_str = f" ({year})" if year else ""
+    text = (
+        f"🎬 <b>{title}{year_str}</b>\n"
+        f"Quality: <b>{quality}</b>\n\n"
+        f"Request this?"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yes", callback_data=f"confirm:{mediaId}:{mediaType}"),
+            InlineKeyboardButton("❌ No", callback_data="cancel"),
+        ]
+    ])
+
+    bot = ctx.deps.config.telegram_bot
+    chat_id = ctx.deps.telegram_chat_id
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+    logger.info(
+        "Sent confirmation keyboard",
+        extra={"mediaId": mediaId, "mediaType": mediaType, "title": title},
+    )
+    return f"Confirmation keyboard sent for '{title}{year_str}' in {quality}. Waiting for user to press a button."
+
+
+async def send_poster_image(
+    ctx: RunContext[AgentDeps],
+    posterPath: str | None,
+    caption: str | None = None,
+) -> str:
+    """Send a movie or TV show poster image to the user.
+
+    Constructs the full TMDB CDN URL from the partial posterPath returned by
+    get_media_details. Telegram downloads the image directly from TMDB's CDN
+    (publicly reachable). Falls back to text if posterPath is None or send_photo fails.
+
+    Args:
+        ctx: Runtime context with dependencies.
+        posterPath: Partial TMDB image path (e.g. '/abc123.jpg'). If None, no image is sent.
+        caption: Optional caption to display below the image.
+
+    Returns:
+        Confirmation that the image was sent, or a fallback message.
+    """
+    if not posterPath:
+        logger.debug("send_poster_image called with no posterPath — skipping")
+        return "No poster image available."
+
+    url = f"{TMDB_IMAGE_BASE}{posterPath}"
+    bot = ctx.deps.config.telegram_bot
+    chat_id = ctx.deps.telegram_chat_id
+
+    try:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=url,
+            caption=caption,
+            parse_mode=ParseMode.HTML if caption else None,
+        )
+        logger.info("Sent poster image", extra={"url": url})
+        return f"Poster image sent."
+    except Exception as e:
+        logger.warning("send_poster_image failed", extra={"url": url, "error": str(e)})
+        return f"Could not send poster image (unavailable)."
+```
+
+**Design note on `telegram_bot` and `telegram_chat_id` in deps:**
+
+These tools need access to the Telegram Bot object and the current chat ID to send messages. This means `AgentDeps` needs two new fields:
+- `telegram_bot: Bot` — the Telegram `Bot` instance
+- `telegram_chat_id: int` — the current chat's ID
+
+`bot.py` populates these in `make_message_handler` from the `Update` object before each `agent.run()` call. The `Bot` instance is available via `application.bot`.
+
+**Update AgentDeps:**
+```python
+from telegram import Bot
+
+@dataclass
+class AgentDeps:
+    config: AppConfig
+    profile_manager: ProfileManager
+    history_manager: HistoryManager
+    user_profile: UserProfile
+    guarded_toolsets: list[GuardedToolset] = field(default_factory=list)
+    telegram_bot: Bot | None = None        # NEW
+    telegram_chat_id: int | None = None   # NEW
+```
+
+**Update system prompt to mention send_confirmation_keyboard:**
+In `prompts.py`, step 4 (CONFIRM) changes from:
+> "call confirm_request after they approve"
+to:
+> "call send_confirmation_keyboard with mediaId, mediaType, title, year, and quality — this shows the user a ✅ Yes / ❌ No button. Do NOT ask for text confirmation. After the user presses ✅ Yes, request_media will automatically proceed."
+
+---
+
+### 4. Register new tools in create_agent()
+
+In `agent.py`, alongside existing tools:
+```python
+from home_agent.tools.telegram_tools import send_confirmation_keyboard, send_poster_image
+
+# Register as @agent.tool wrappers
+@agent.tool
+async def send_confirmation_keyboard_tool(ctx: RunContext[AgentDeps], ...) -> str:
+    ...
+
+@agent.tool
+async def send_poster_image_tool(ctx: RunContext[AgentDeps], ...) -> str:
+    ...
+```
+
+---
+
+## Import-Linter Compliance
+
+- `src/home_agent/formatting.py` is a new standalone module — no imports from agent/bot/main ✅
+- `src/home_agent/tools/telegram_tools.py` is in the tools layer — may import from profile/config ✅
+- `bot.py` imports formatting and telegram tools — already in bot layer ✅
+- No new import-linter contracts needed
+
+---
+
+## Tests
+
+### test_formatting.py
+```python
+from home_agent.formatting import md_to_telegram_html
+
+def test_bold(): assert md_to_telegram_html("**bold**") == "<b>bold</b>\n"
+def test_italic(): assert md_to_telegram_html("*italic*") == "<i>italic</i>\n"
+def test_inline_code(): assert "<code>x</code>" in md_to_telegram_html("`x`")
+def test_fenced_code(): assert "<pre>" in md_to_telegram_html("```\ncode\n```")
+def test_heading(): assert "<b>Header</b>" in md_to_telegram_html("# Header")
+def test_list(): assert "•" in md_to_telegram_html("- item")
+def test_escape_ampersand(): assert "&amp;" in md_to_telegram_html("5 & 3")
+def test_escape_lt(): assert "&lt;" in md_to_telegram_html("a < b")
+def test_escape_gt(): assert "&gt;" in md_to_telegram_html("a > b")
+def test_plain_text(): assert md_to_telegram_html("hello") == "hello\n"
+def test_fallback_on_error(): result = md_to_telegram_html(None)  # should not raise
+```
+
+### test_telegram_tools.py
+```python
+# send_confirmation_keyboard sends InlineKeyboardMarkup with correct callback_data
+# send_poster_image constructs correct TMDB CDN URL from posterPath
+# send_poster_image falls back gracefully if posterPath is None
+# send_poster_image falls back gracefully if send_photo raises
+```
+
+### test_bot.py
+```python
+# callback_query_handler registered in create_application()
+# "confirm:123:movie" callback sets confirmed=True on GuardedToolset
+# "cancel" callback sets confirmed=False
+# All reply_text calls use parse_mode=ParseMode.HTML
+```
+
+---
+
+## Success Criteria
+
+- `md_to_telegram_html()` correctly converts all Markdown elements
+- All `reply_text()` calls in bot.py use `parse_mode=ParseMode.HTML`
+- Inline keyboard appears at confirmation step (no plain text "Are you sure?")
+- ✅ Yes button sets `confirmed=True` and re-runs agent to complete the request
+- ❌ No button resets confirmed and sends cancellation
+- Poster image shown with TMDB CDN URL (not Seerr proxy URL)
+- All tests pass, `verify.sh` green

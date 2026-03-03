@@ -1,0 +1,540 @@
+---
+step: 4.4
+title: Voice Message Support (Qwen3-ASR-1.7B on CPU)
+goal: >
+  User sends a voice message in Telegram; a local Qwen3-ASR-1.7B Docker sidecar
+  transcribes it on CPU; the transcribed text is fed to the agent as a normal
+  text message. No GPU required. Expected latency: 2-5s on a Core i3.
+
+approach: |
+  Qwen3-ASR-1.7B is deployed as a Docker sidecar exposing a simple HTTP API.
+  Bot downloads the OGG/Opus voice file from Telegram, POSTs it to the ASR
+  container, receives the transcribed text, and calls handle_message() as if
+  the user typed the text.
+
+  Audio format investigation is REQUIRED before implementation:
+  - Telegram sends voice messages as OGG/Opus
+  - Qwen3-ASR uses transformers pipeline("automatic-speech-recognition")
+  - Most HuggingFace ASR pipelines accept WAV (16kHz mono) natively
+  - OGG/Opus → WAV conversion is best done IN the ASR container via ffmpeg
+    (keep bot.py simple, no audio processing in Python)
+  - If Qwen3-ASR accepts OGG directly (via soundfile or librosa), skip ffmpeg
+
+  Model reference: https://huggingface.co/Qwen/Qwen3-ASR-1.7B
+  Runs entirely on CPU (no GPU flags, no CUDA). Model is ~3.4GB in fp16.
+  Consider quantized version if memory is tight on the Core i3.
+
+---
+
+## Key Files
+
+### New Files
+- `mcp_servers/qwen3_asr/Dockerfile` — CPU-only ASR container
+- `mcp_servers/qwen3_asr/server.py` — FastAPI HTTP server wrapping Qwen3-ASR
+- `mcp_servers/qwen3_asr/requirements.txt` — transformers, fastapi, uvicorn, torch (CPU)
+- `tests/test_voice.py` — Unit tests for voice handler in bot.py
+
+### Modified Files
+- `deployment/docker-compose.yml` — Add qwen3-asr service
+- `src/home_agent/config.py` — Add `asr_url: str` field
+- `src/home_agent/bot.py` — Add `voice_message_handler()`
+- `tests/test_docker.py` — Verify docker-compose has qwen3-asr service
+
+---
+
+## Step-by-Step Implementation
+
+### 1. Investigate OGG/Opus support FIRST
+
+**Before writing any code**, verify whether Qwen3-ASR accepts OGG/Opus directly:
+
+```python
+# Quick test in the ASR container:
+from transformers import pipeline
+asr = pipeline("automatic-speech-recognition", model="Qwen/Qwen3-ASR-1.7B")
+result = asr("test.ogg")  # Does this work?
+print(result["text"])
+```
+
+If it fails → add ffmpeg to the ASR container Dockerfile and convert OGG → WAV before passing to the pipeline.
+If it works → no ffmpeg needed, pass OGG bytes directly.
+
+**Decision must be documented in a comment in server.py.**
+
+---
+
+### 2. mcp_servers/qwen3_asr/Dockerfile
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install ffmpeg if needed for OGG → WAV conversion
+# (include if investigation shows OGG not accepted natively)
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY server.py .
+
+# Pre-download model at build time into the image layer
+# (avoids slow first-start downloads; image will be large ~3.5GB)
+RUN python -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='Qwen/Qwen3-ASR-1.7B')"
+
+EXPOSE 8086
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8086"]
+```
+
+**Design notes:**
+- Model is baked into the image at build time — first `docker-compose up --build` will be slow
+  but subsequent starts are fast. Alternatively, mount a model cache volume (see compose).
+- CPU-only: no CUDA, no GPU flags
+- `python:3.12-slim` base keeps the image as small as possible
+
+---
+
+### 3. mcp_servers/qwen3_asr/requirements.txt
+
+```
+transformers>=4.40.0
+torch>=2.2.0          # CPU-only wheel; use --index-url https://download.pytorch.org/whl/cpu
+fastapi>=0.110.0
+uvicorn>=0.29.0
+soundfile>=0.12.1     # For audio loading (WAV)
+librosa>=0.10.1       # Optional: if OGG support needed without ffmpeg
+httpx>=0.27.0         # Not strictly needed but useful for health checks
+```
+
+**Note:** Use CPU-only PyTorch to avoid pulling the massive CUDA wheel:
+```dockerfile
+RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
+RUN pip install -r requirements.txt
+```
+
+---
+
+### 4. mcp_servers/qwen3_asr/server.py
+
+```python
+"""Qwen3-ASR-1.7B HTTP transcription server.
+
+Exposes a single POST /transcribe endpoint that accepts audio bytes and returns
+transcribed text. Runs on CPU — designed for home server deployment.
+
+Audio format: OGG/Opus from Telegram.
+[INVESTIGATION RESULT]: Document here whether OGG is accepted directly or
+converted to WAV via ffmpeg.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import os
+import subprocess
+import tempfile
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+from transformers import pipeline
+
+logger = logging.getLogger(__name__)
+
+ASR_MODEL = os.environ.get("ASR_MODEL", "Qwen/Qwen3-ASR-1.7B")
+DEVICE = "cpu"  # Always CPU — no GPU on home server
+
+_asr_pipeline = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load model at startup, release at shutdown."""
+    global _asr_pipeline
+    logger.info("Loading ASR model: %s on %s", ASR_MODEL, DEVICE)
+    _asr_pipeline = pipeline(
+        "automatic-speech-recognition",
+        model=ASR_MODEL,
+        device=DEVICE,
+    )
+    logger.info("ASR model loaded successfully")
+    yield
+    _asr_pipeline = None
+    logger.info("ASR model unloaded")
+
+
+app = FastAPI(title="Qwen3-ASR", lifespan=lifespan)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "ok", "model": ASR_MODEL}
+
+
+@app.post("/transcribe")
+async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
+    """Transcribe an audio file to text.
+
+    Accepts OGG/Opus from Telegram voice messages. If OGG is not natively
+    supported by the ASR pipeline, convert to WAV via ffmpeg first.
+
+    Args:
+        audio: Uploaded audio file (OGG/Opus from Telegram).
+
+    Returns:
+        JSON with 'text' field containing the transcription.
+
+    Raises:
+        HTTPException 500: If transcription fails.
+    """
+    if _asr_pipeline is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    try:
+        audio_bytes = await audio.read()
+
+        # Option A: Direct OGG (if investigation shows it works)
+        # result = _asr_pipeline(io.BytesIO(audio_bytes))
+
+        # Option B: Convert OGG → WAV via ffmpeg first
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as ogg_file:
+            ogg_file.write(audio_bytes)
+            ogg_path = ogg_file.name
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_file:
+            wav_path = wav_file.name
+
+        subprocess.run(
+            ["ffmpeg", "-i", ogg_path, "-ar", "16000", "-ac", "1", wav_path, "-y"],
+            check=True,
+            capture_output=True,
+        )
+
+        result = _asr_pipeline(wav_path)
+        text = result.get("text", "").strip()
+
+        logger.info("Transcribed %d bytes → %d chars", len(audio_bytes), len(text))
+        return JSONResponse({"text": text})
+
+    except subprocess.CalledProcessError as e:
+        logger.error("ffmpeg conversion failed: %s", e.stderr.decode())
+        raise HTTPException(status_code=500, detail="Audio conversion failed") from e
+    except Exception as e:
+        logger.exception("Transcription failed")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}") from e
+    finally:
+        # Clean up temp files
+        import os as _os
+        for path in [ogg_path, wav_path]:
+            try:
+                _os.unlink(path)
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8086)
+```
+
+---
+
+### 5. deployment/docker-compose.yml
+
+Add the qwen3-asr service:
+
+```yaml
+  qwen3-asr:
+    build:
+      context: ../mcp_servers/qwen3_asr
+      dockerfile: Dockerfile
+    container_name: qwen3-asr
+    environment:
+      - ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+    ports:
+      - "8086:8086"
+    volumes:
+      # Cache the HuggingFace model to avoid re-downloading on restart
+      - huggingface_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # Model loading takes time on CPU
+    restart: unless-stopped
+    networks:
+      - home-agent-net
+
+# Add to volumes section:
+volumes:
+  huggingface_cache:
+```
+
+**Note:** `start_period: 120s` — the model takes 30-60s to load on a Core i3 on first start.
+
+**home-agent service dependency:**
+```yaml
+  home-agent:
+    depends_on:
+      qwen3-asr:
+        condition: service_healthy
+```
+
+---
+
+### 6. src/home_agent/config.py
+
+Add ASR URL to AppConfig:
+
+```python
+class AppConfig(BaseSettings):
+    # ... existing fields ...
+    asr_url: str = Field(default="http://qwen3-asr:8086")
+    """URL of the Qwen3-ASR transcription service."""
+```
+
+---
+
+### 7. src/home_agent/bot.py — voice_message_handler()
+
+```python
+import httpx
+from telegram import Voice
+from telegram.ext import MessageHandler, filters
+
+def make_voice_handler(
+    config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+    agent: Agent,
+    guarded_toolsets: list[GuardedToolset] | None = None,
+):
+    """Create a Telegram voice message handler.
+
+    Downloads voice OGG from Telegram, sends to ASR service for transcription,
+    then forwards transcribed text to the normal message handler.
+
+    Args:
+        config: Application config (contains asr_url).
+        profile_manager: User profile persistence.
+        history_manager: Conversation history persistence.
+        agent: PydanticAI agent instance.
+        guarded_toolsets: Optional list of GuardedToolset instances.
+
+    Returns:
+        An async handler coroutine compatible with python-telegram-bot.
+    """
+    # Reuse the text message handler for actual agent invocation
+    text_handler = make_message_handler(
+        config, profile_manager, history_manager, agent, guarded_toolsets
+    )
+
+    async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle an incoming Telegram voice message.
+
+        Args:
+            update: The incoming Telegram update containing the voice message.
+            context: The callback context provided by python-telegram-bot.
+        """
+        if update.effective_user is None or update.message is None:
+            return
+
+        user_id = update.effective_user.id
+        if user_id not in config.allowed_telegram_ids:
+            await update.message.reply_text(_REJECTION_MESSAGE)
+            return
+
+        voice: Voice | None = update.message.voice
+        if voice is None:
+            return
+
+        logger.debug("Voice message received from user %d, duration=%ds", user_id, voice.duration)
+
+        # Show typing indicator during transcription (can take 2-5s on CPU)
+        if update.effective_chat is not None:
+            await update.effective_chat.send_action(action=ChatAction.TYPING)
+
+        try:
+            # Download OGG voice file from Telegram
+            voice_file = await context.bot.get_file(voice.file_id)
+            ogg_bytes = await voice_file.download_as_bytearray()
+
+            logger.debug("Downloaded voice OGG: %d bytes", len(ogg_bytes))
+
+            # POST to ASR service
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{config.asr_url}/transcribe",
+                    files={"audio": ("voice.ogg", bytes(ogg_bytes), "audio/ogg")},
+                )
+                response.raise_for_status()
+                transcribed_text = response.json()["text"]
+
+            logger.info(
+                "Transcribed voice for user %d: %r",
+                user_id,
+                transcribed_text[:100],
+            )
+
+            if not transcribed_text.strip():
+                await update.message.reply_text(
+                    "🎙️ I couldn't make out what you said. Please try again."
+                )
+                return
+
+            # Inject transcribed text as if user typed it
+            # Override update.message.text so handle_message sees it as a text message
+            update.message._unfreeze()
+            update.message.text = transcribed_text
+            update.message._freeze()
+
+            await text_handler(update, context)
+
+        except httpx.HTTPError as e:
+            logger.error("ASR service error for user %d: %s", user_id, e)
+            await update.message.reply_text(
+                "🎙️ Voice transcription is temporarily unavailable. Please type your message instead."
+            )
+        except Exception as e:
+            logger.error("Voice handler failed for user %d: %s", user_id, e, exc_info=True)
+            await update.message.reply_text(
+                "🎙️ Something went wrong processing your voice message."
+            )
+
+    return handle_voice
+```
+
+**Design note on overriding `message.text`:**
+python-telegram-bot `Message` objects are frozen by default. The cleanest approach is to NOT mutate `update.message.text` but instead extract the text and call `handle_message` logic directly. Alternative: pass `transcribed_text` directly into a shared inner function that both handlers call. This avoids mutation entirely — preferred approach.
+
+**Refactor handle_message to accept text parameter:**
+```python
+async def _run_agent_for_text(
+    text: str,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    config, profile_manager, history_manager, agent, guarded_toolsets
+) -> None:
+    """Core agent invocation logic, shared by text and voice handlers."""
+    # ... all the current handle_message body ...
+```
+
+---
+
+### 8. Register voice handler in create_application()
+
+```python
+from telegram.ext import MessageHandler, filters
+
+# Add after existing MessageHandler:
+voice_handler_fn = make_voice_handler(
+    config, profile_manager, history_manager, agent, guarded_toolsets
+)
+app.add_handler(MessageHandler(filters.VOICE, voice_handler_fn))
+```
+
+---
+
+## Tests
+
+### test_voice.py
+
+```python
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from telegram import Update, User, Message, Chat, Voice
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_downloads_and_transcribes():
+    """Voice handler downloads OGG and POSTs to ASR service."""
+    # Mock Telegram voice message
+    # Mock httpx POST → returns {"text": "play Inception"}
+    # Verify handle_message called with "play Inception"
+    pass
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_asr_failure_sends_error():
+    """Voice handler sends user-friendly error if ASR service is down."""
+    # Mock httpx POST → raises httpx.HTTPError
+    # Verify error message sent to user
+    pass
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_empty_transcription():
+    """Voice handler handles empty transcription gracefully."""
+    # Mock ASR returns {"text": ""}
+    # Verify "couldn't make out" message sent
+    pass
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_unauthorized_user():
+    """Unauthorized user rejected before ASR call."""
+    # user_id not in allowed_telegram_ids
+    # Verify ASR service NOT called
+    # Verify rejection message sent
+    pass
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_typing_indicator():
+    """Typing indicator shown during transcription."""
+    # Verify send_action(ChatAction.TYPING) called before ASR
+    pass
+```
+
+### test_docker.py additions
+
+```python
+def test_compose_has_qwen3_asr_service(compose_config):
+    """docker-compose.yml includes qwen3-asr service."""
+    assert "qwen3-asr" in compose_config["services"]
+
+def test_qwen3_asr_has_asr_model_env(compose_config):
+    """qwen3-asr service has ASR_MODEL env var."""
+    env = compose_config["services"]["qwen3-asr"].get("environment", [])
+    assert any("ASR_MODEL" in e for e in env)
+
+def test_qwen3_asr_has_healthcheck(compose_config):
+    """qwen3-asr service has a healthcheck configured."""
+    assert "healthcheck" in compose_config["services"]["qwen3-asr"]
+
+def test_home_agent_depends_on_qwen3_asr(compose_config):
+    """home-agent service waits for qwen3-asr to be healthy."""
+    depends = compose_config["services"]["home-agent"].get("depends_on", {})
+    assert "qwen3-asr" in depends
+```
+
+---
+
+## Performance Expectations on Core i3
+
+| Voice message length | Expected transcription time (CPU, fp16) |
+|---|---|
+| < 5 seconds | 2-4 seconds |
+| 5-15 seconds | 4-10 seconds |
+| > 30 seconds | 15-30 seconds |
+
+For long voice messages, consider showing a "🎙️ Transcribing your message..." reply first, then editing it when done. This prevents the user thinking the bot is broken.
+
+---
+
+## Success Criteria
+
+- Docker-compose starts qwen3-asr service successfully
+- `/health` endpoint returns `{"status": "ok"}`
+- Voice message in Telegram → transcribed text → agent responds correctly
+- OGG/Opus handling confirmed (direct or via ffmpeg, documented in server.py)
+- ASR failure sends user-friendly error, does NOT crash bot
+- Empty transcription handled gracefully
+- Typing indicator shown during transcription
+- All tests pass, `verify.sh` green (note: ASR container tests are integration-only,
+  not in pytest suite — tested via docker-compose manually)

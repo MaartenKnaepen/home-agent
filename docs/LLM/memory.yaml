@@ -7,11 +7,11 @@ project: home-agent
 last_updated: "2026-02-28"
 
 current_state:
-  phase: 3
-  step: "3.3"
-  name: "Wire GuardedToolset into Agent Pipeline"
+  phase: 4
+  step: "4.1"
+  name: "Rich Telegram Formatting"
   status: "complete"
-  next_step: "3.4 — Verify & Document Tool Guards"
+  next_step: "4.3 — Multi-User Support (4.2 removed, handled by Seerr natively)"
   description: "Implemented GuardedToolset wrapper for MCP tool call middleware using Option B from tool_control.md. Guards enforce quality must be set before request_media. Confirmation gate blocks request_media when confirmation_mode='always'. confirm_request tool sets the confirmed flag. All non-gated tools pass through transparently (search_media, future PDF/file tools). Wired GuardedToolsets into agent pipeline: MCPRegistry wraps toolsets, bot.py injects deps before agent.run(), main.py passes guarded_toolsets through the composition chain."
   working_features:
     - "Config loading from .env via pydantic-settings"
@@ -85,6 +85,11 @@ current_state:
   known_issues: []
 
 completed_steps:
+  - step: "4.1"
+    name: "Rich Telegram Formatting"
+    date: "2026-03-02"
+    summary: "Implemented md_to_telegram_html() in formatting.py using markdown-it-py token stream. All reply_text() calls use parse_mode=ParseMode.HTML. send_confirmation_keyboard() @agent.tool sends InlineKeyboardMarkup with callback_data='confirm:{mediaId}:{mediaType}' and 'cancel'. Callback handler in bot.py sets GuardedToolset.set_confirmed() then re-runs agent. send_poster_image() constructs TMDB CDN URL (https://image.tmdb.org/t/p/w500{posterPath}) — never uses Seerr proxy URL. AgentDeps extended with telegram_bot: Bot | None and telegram_chat_id: int | None. System prompt updated to use send_confirmation_keyboard instead of confirm_request for confirmation flow. 216 tests pass, framework boundary rules followed (real GuardedToolset in callback tests). Phase 4.2 removed (Seerr handles natively)."
+    decision: "markdown-it-py chosen over telegramify-markdown (targets MarkdownV2 with complex escaping) and custom regex (fragile). markdown-it-py was already a transitive dep. TMDB CDN URLs used for poster images — Seerr's own proxy is not publicly reachable by Telegram servers."
   - step: "3.3"
     name: "Wire GuardedToolset into Agent Pipeline"
     date: "2026-03-02"
