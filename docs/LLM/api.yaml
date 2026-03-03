@@ -406,6 +406,43 @@ modules:
         signature: "str"
         description: "Base URL for TMDB CDN poster images: 'https://image.tmdb.org/t/p/w500'. Append posterPath from get_media_details to form full URL."
 
+  # ── Voice Message Support ─────────────────────────────────────────────────────
+  - module: "src/home_agent/bot.py (_invoke_agent)"
+    exports:
+      - name: "_invoke_agent"
+        type: "module-level async function"
+        signature: "(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE, config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent, guarded_toolsets: list, pending_confirmations: dict) -> None"
+        description: "Shared agent invocation logic used by both text and voice message handlers. Loads user profile, consumes pending_confirmations, builds AgentDeps, runs agent.run(), splits HTML reply, sends to Telegram. Handles 429 rate-limit, generic HTTP errors, and unexpected exceptions."
+
+      - name: "make_voice_handler"
+        type: "function"
+        signature: "(config: AppConfig, profile_manager: ProfileManager, history_manager: HistoryManager, agent: Agent, guarded_toolsets: list | None = None) -> Callable"
+        description: "Creates the Telegram voice message handler. Downloads OGG from Telegram via get_file()/download_as_bytearray(), POSTs to config.asr_url/transcribe via httpx multipart, feeds transcribed text to _invoke_agent(). Rejects unauthorized users before ASR call. Shows ChatAction.TYPING. Handles empty transcription, HTTPStatusError, RequestError, TimeoutException with user-friendly HTML messages."
+
+  - module: "src/home_agent/config.py (asr_url)"
+    exports:
+      - name: "AppConfig.asr_url"
+        type: "field"
+        signature: "str = 'http://qwen3-asr:8086'"
+        description: "URL of the Qwen3-ASR transcription service Docker container. Set via ASR_URL env var."
+
+  - module: "mcp_servers/qwen3_asr/server.py"
+    exports:
+      - name: "POST /transcribe"
+        type: "FastAPI endpoint"
+        signature: "UploadFile → JSONResponse({'text': str})"
+        description: "Accepts OGG/Opus audio upload, saves to temp file, runs model.transcribe() in thread pool executor, returns transcribed text. Cleans up temp file in finally block. Returns 503 if model not loaded, 500 on transcription failure."
+
+      - name: "GET /health"
+        type: "FastAPI endpoint"
+        signature: "→ {'status': 'ok', 'model': str}"
+        description: "Health check endpoint. Returns 503 if model not loaded. Used by docker-compose healthcheck."
+
+      - name: "_load_model"
+        type: "function"
+        signature: "() -> Qwen3ASRModel"
+        description: "Loads Qwen3-ASR-1.7B on CPU with bfloat16 (~3.4GB RAM). Falls back to float32 (~6.8GB) if bfloat16 not supported. Called in lifespan via thread pool executor."
+
   # ── Multi-User & Permissions ──────────────────────────────────────────────────
   - module: "src/home_agent/profile.py (role field)"
     exports:

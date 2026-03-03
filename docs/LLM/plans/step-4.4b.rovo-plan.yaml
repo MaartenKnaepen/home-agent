@@ -1,0 +1,381 @@
+---
+step: 4.4b
+title: Qwen3-ASR Docker Image (CPU-only)
+goal: >
+  Build a custom CPU-only Docker image for Qwen3-ASR-1.7B using the transformers
+  backend. Expose a FastAPI HTTP transcription endpoint at POST /transcribe.
+  Add the service to docker-compose.yml. No GPU, no CUDA, no NVIDIA runtime.
+
+approach: |
+  The official qwenllm/qwen3-asr:latest image is GPU-only (nvidia/cuda:12.8.0
+  base, vLLM backend, 14.4GB). It cannot run on a Core i3 without an NVIDIA GPU.
+
+  We build our own slim image:
+  - Base: python:3.12-slim (no CUDA, no NVIDIA)
+  - Backend: transformers (qwen-asr package, NOT qwen-asr[vllm])
+  - PyTorch: CPU-only wheel (--index-url https://download.pytorch.org/whl/cpu)
+  - Server: FastAPI + uvicorn
+  - Audio: OGG/Opus accepted natively by qwen-asr (soundfile/librosa), no ffmpeg
+  - model.transcribe() is synchronous — run in asyncio thread pool executor
+  - Model pre-downloaded at Docker build time (cached in image layer)
+  - bfloat16 dtype preferred (~3.4GB RAM); fallback to float32 if CPU unsupported
+
+---
+
+## Key Files
+
+### New Files
+- `mcp_servers/qwen3_asr/Dockerfile`
+- `mcp_servers/qwen3_asr/server.py`
+- `mcp_servers/qwen3_asr/requirements.txt`
+
+### Modified Files
+- `deployment/docker-compose.yml` — add qwen3-asr service
+- `tests/test_docker.py` — verify service configuration
+
+---
+
+## Step-by-Step Implementation
+
+### 1. mcp_servers/qwen3_asr/requirements.txt
+
+```
+# CPU-only torch installed separately in Dockerfile via --index-url
+# Do NOT include torch here — it would pull the CUDA wheel
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+qwen-asr>=0.1.0
+soundfile>=0.12.1
+```
+
+**Note:** torch is installed separately in the Dockerfile with the CPU-only index URL.
+If included in requirements.txt it would pull the full CUDA wheel (~2GB).
+
+---
+
+### 2. mcp_servers/qwen3_asr/Dockerfile
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install system deps (minimal — no ffmpeg needed, qwen-asr handles OGG natively)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CPU-only PyTorch FIRST (separate from requirements.txt to use custom index)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy server code
+COPY server.py .
+
+# Pre-download model at build time into image layers
+# This makes container startup fast (no download on first run)
+# Set TRANSFORMERS_CACHE to a predictable location
+ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
+ENV ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+
+RUN python -c "\
+from qwen_asr import Qwen3ASRModel; \
+print('Downloading model...'); \
+Qwen3ASRModel.from_pretrained('${ASR_MODEL}', device_map='cpu'); \
+print('Model downloaded successfully')"
+
+EXPOSE 8086
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=120s \
+    CMD curl -f http://localhost:8086/health || exit 1
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8086"]
+```
+
+**Design decisions:**
+- No ffmpeg — qwen-asr accepts OGG natively via soundfile
+- No CUDA packages — pure CPU inference
+- Model baked into image: first build is slow (~10-20min), subsequent starts are instant
+- `device_map='cpu'` explicitly set — no GPU detection needed
+- `--no-install-recommends` and `rm -rf /var/lib/apt/lists/*` keep image slim
+
+---
+
+### 3. mcp_servers/qwen3_asr/server.py
+
+```python
+"""Qwen3-ASR-1.7B HTTP transcription server.
+
+CPU-only deployment using the transformers backend (qwen-asr package).
+Exposes POST /transcribe for audio transcription and GET /health for readiness.
+
+Audio format: OGG/Opus from Telegram voice messages — accepted natively.
+No ffmpeg required — qwen-asr uses soundfile/librosa under the hood.
+
+Model: Qwen/Qwen3-ASR-1.7B (configurable via ASR_MODEL env var)
+Dtype: bfloat16 (falls back to float32 if CPU does not support it)
+Inference: synchronous model.transcribe() runs in asyncio thread pool executor
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import tempfile
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import torch
+import uvicorn
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+from qwen_asr import Qwen3ASRModel
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+ASR_MODEL = os.environ.get("ASR_MODEL", "Qwen/Qwen3-ASR-1.7B")
+
+_model: Qwen3ASRModel | None = None
+
+
+def _load_model() -> Qwen3ASRModel:
+    """Load Qwen3-ASR model on CPU with bfloat16, fallback to float32.
+
+    Returns:
+        Loaded Qwen3ASRModel instance.
+    """
+    # Try bfloat16 first — ~3.4GB RAM vs ~6.8GB for float32
+    # bfloat16 on CPU requires AVX512-BF16 support (most modern x86_64)
+    try:
+        logger.info("Loading %s with bfloat16 on CPU...", ASR_MODEL)
+        model = Qwen3ASRModel.from_pretrained(
+            ASR_MODEL,
+            device_map="cpu",
+            torch_dtype=torch.bfloat16,
+        )
+        logger.info("Model loaded in bfloat16 (%.1f GB RAM)", 3.4)
+        return model
+    except (RuntimeError, Exception) as e:
+        logger.warning("bfloat16 failed (%s), falling back to float32", e)
+        model = Qwen3ASRModel.from_pretrained(
+            ASR_MODEL,
+            device_map="cpu",
+            torch_dtype=torch.float32,
+        )
+        logger.info("Model loaded in float32 (%.1f GB RAM)", 6.8)
+        return model
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load model at startup, release at shutdown.
+
+    Args:
+        app: FastAPI application instance.
+
+    Yields:
+        Control to FastAPI after model is loaded.
+    """
+    global _model
+    logger.info("Starting Qwen3-ASR server, loading model: %s", ASR_MODEL)
+    _model = await asyncio.get_event_loop().run_in_executor(None, _load_model)
+    logger.info("Model ready. Server accepting requests.")
+    yield
+    _model = None
+    logger.info("Model unloaded.")
+
+
+app = FastAPI(
+    title="Qwen3-ASR",
+    description="CPU-only speech-to-text using Qwen3-ASR-1.7B",
+    lifespan=lifespan,
+)
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Health check endpoint.
+
+    Returns:
+        Dict with status and model name.
+    """
+    if _model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    return {"status": "ok", "model": ASR_MODEL}
+
+
+@app.post("/transcribe")
+async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
+    """Transcribe an OGG/Opus audio file to text.
+
+    Accepts voice messages from Telegram (OGG/Opus format). Saves to a
+    temporary file and passes the path to qwen-asr for transcription.
+    Runs in a thread pool executor to avoid blocking the async event loop.
+
+    Args:
+        audio: Uploaded audio file. Expected OGG/Opus from Telegram.
+
+    Returns:
+        JSON with 'text' field containing the transcription.
+
+    Raises:
+        HTTPException 503: If model is not loaded.
+        HTTPException 500: If transcription fails.
+    """
+    if _model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    # Save uploaded bytes to a temp file — qwen-asr needs a file path
+    tmp_path: Path | None = None
+    try:
+        audio_bytes = await audio.read()
+        logger.debug("Received audio: %d bytes, content_type=%s", len(audio_bytes), audio.content_type)
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = Path(tmp.name)
+
+        # model.transcribe() is synchronous — run in thread pool to avoid blocking
+        def _transcribe() -> str:
+            results = _model.transcribe(audio=str(tmp_path))  # type: ignore[union-attr]
+            return results[0].text if results else ""
+
+        text = await asyncio.get_event_loop().run_in_executor(None, _transcribe)
+        text = text.strip()
+
+        logger.info("Transcribed %d bytes → %d chars: %r", len(audio_bytes), len(text), text[:80])
+        return JSONResponse({"text": text})
+
+    except Exception as e:
+        logger.exception("Transcription failed")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}") from e
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8086, log_level="info")
+```
+
+---
+
+### 4. deployment/docker-compose.yml additions
+
+Add to the services section:
+
+```yaml
+  qwen3-asr:
+    build:
+      context: ../mcp_servers/qwen3_asr
+      dockerfile: Dockerfile
+    container_name: qwen3-asr
+    environment:
+      - ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+    ports:
+      - "8086:8086"
+    volumes:
+      # Persist HuggingFace model cache across rebuilds
+      # (prevents re-downloading 3.4GB on every docker-compose build)
+      - huggingface_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s  # Model loading takes 30-60s on Core i3
+    restart: unless-stopped
+    networks:
+      - home-agent-net
+    # NO gpu/runtime: nvidia — CPU only
+```
+
+Add to volumes section:
+```yaml
+volumes:
+  huggingface_cache:
+```
+
+Update home-agent service:
+```yaml
+  home-agent:
+    depends_on:
+      seerr-mcp:
+        condition: service_healthy
+      qwen3-asr:
+        condition: service_healthy  # ADD THIS
+```
+
+---
+
+### 5. tests/test_docker.py additions
+
+```python
+def test_qwen3_asr_service_exists(compose_config):
+    """docker-compose has qwen3-asr service."""
+    assert "qwen3-asr" in compose_config["services"]
+
+
+def test_qwen3_asr_has_no_gpu_config(compose_config):
+    """qwen3-asr has no GPU/NVIDIA runtime config — CPU only."""
+    service = compose_config["services"]["qwen3-asr"]
+    assert "runtime" not in service
+    assert "deploy" not in service or "resources" not in service.get("deploy", {})
+    # No nvidia-related entries
+    env = service.get("environment", [])
+    env_str = str(env)
+    assert "NVIDIA" not in env_str
+
+
+def test_qwen3_asr_has_healthcheck(compose_config):
+    """qwen3-asr has a healthcheck with adequate start_period."""
+    service = compose_config["services"]["qwen3-asr"]
+    assert "healthcheck" in service
+    # start_period should be at least 60s to allow model loading
+    healthcheck = service["healthcheck"]
+    assert "start_period" in str(healthcheck)
+
+
+def test_qwen3_asr_has_huggingface_volume(compose_config):
+    """qwen3-asr mounts huggingface_cache volume."""
+    service = compose_config["services"]["qwen3-asr"]
+    volumes = service.get("volumes", [])
+    assert any("huggingface_cache" in str(v) for v in volumes)
+
+
+def test_qwen3_asr_has_asr_model_env(compose_config):
+    """qwen3-asr service has ASR_MODEL env var."""
+    service = compose_config["services"]["qwen3-asr"]
+    env = service.get("environment", [])
+    assert any("ASR_MODEL" in str(e) for e in env)
+
+
+def test_home_agent_depends_on_qwen3_asr(compose_config):
+    """home-agent service waits for qwen3-asr to be healthy."""
+    depends = compose_config["services"]["home-agent"].get("depends_on", {})
+    assert "qwen3-asr" in depends
+```
+
+---
+
+## Import-Linter Compliance
+
+`mcp_servers/qwen3_asr/` is a standalone service, not part of the `src/home_agent/`
+package. No import-linter contracts apply to it.
+
+---
+
+## Success Criteria
+
+- `mcp_servers/qwen3_asr/Dockerfile` builds without errors (locally testable)
+- `server.py` has correct FastAPI lifespan, /health, /transcribe endpoints
+- `requirements.txt` does NOT include torch (installed separately with CPU index)
+- `docker-compose.yml` has qwen3-asr service with no GPU config, correct healthcheck
+- All `test_docker.py` tests pass
+- `verify.sh` green: ty, lint-imports, pytest

@@ -66,3 +66,9 @@ def test_admin_telegram_ids_parsed_from_env(mock_env):
     os.environ["ADMIN_TELEGRAM_IDS"] = "[111, 222]"
     config = AppConfig()
     assert config.admin_telegram_ids == [111, 222]
+
+
+def test_asr_url_default(mock_env: None) -> None:
+    """asr_url defaults to the Qwen3-ASR container address."""
+    config = AppConfig()
+    assert config.asr_url == "http://qwen3-asr:8086"

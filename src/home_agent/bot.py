@@ -7,7 +7,10 @@ Business logic lives in agent.py. This module is Telegram wiring only.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Coroutine
+from typing import Any
 
+import httpx
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 from telegram import Update
@@ -30,6 +33,119 @@ from home_agent.profile import ProfileManager
 logger = logging.getLogger(__name__)
 
 _REJECTION_MESSAGE = "Sorry, you are not authorized to use this bot."
+
+
+async def _invoke_agent(
+    text: str,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+    agent: Agent[AgentDeps, str],
+    guarded_toolsets: list[GuardedToolset],
+    pending_confirmations: dict[int, tuple[int, str]],
+) -> None:
+    """Build AgentDeps, run the agent, and send the HTML-formatted reply.
+
+    Shared agent invocation logic used by both text and voice message handlers.
+    Handles profile loading, pending_confirmations consumption, agent.run(),
+    history persistence, message splitting, and error handling.
+
+    Args:
+        text: The user's message text (typed or transcribed).
+        update: The incoming Telegram update.
+        context: The callback context provided by python-telegram-bot.
+        config: Application configuration.
+        profile_manager: Manages user profile persistence.
+        history_manager: Manages conversation history persistence.
+        agent: The PydanticAI agent instance to use for inference.
+        guarded_toolsets: List of GuardedToolset instances.
+        pending_confirmations: Shared dict keyed by user_id for inline-keyboard
+            confirmations.
+    """
+    assert update.effective_user is not None
+    assert update.message is not None
+
+    user_id = update.effective_user.id
+
+    # Load user profile, seeding language for new users from Telegram locale
+    language_code = update.effective_user.language_code
+    user_profile = await profile_manager.get(user_id, language_code=language_code)
+
+    # Load and convert conversation history to PydanticAI ModelMessage objects
+    raw_history = await history_manager.get_history(user_id=user_id)
+    message_history = convert_history_to_messages(raw_history)
+
+    # Read and consume any pending confirmation from the inline keyboard
+    confirmed = False
+    if user_id in pending_confirmations:
+        _media_id, _media_type = pending_confirmations.pop(user_id)
+        confirmed = True
+        logger.info(
+            "Consumed pending confirmation for user",
+            extra={
+                "user_id": user_id,
+                "mediaId": _media_id,
+                "mediaType": _media_type,
+            },
+        )
+
+    deps = AgentDeps(
+        config=config,
+        profile_manager=profile_manager,
+        history_manager=history_manager,
+        user_profile=user_profile,
+        guarded_toolsets=guarded_toolsets,
+        telegram_bot=context.bot,
+        telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
+        confirmed=confirmed,
+        called_tools=set(),
+        role=user_profile.role,
+    )
+
+    try:
+        result = await agent.run(text, deps=deps, message_history=message_history)
+        reply = result.output
+        logger.info("Agent output for user %d: %r", user_id, reply[:200] if reply else reply)
+    except ModelHTTPError as exc:
+        if exc.status_code == 429:
+            logger.warning("Rate limit exhausted for user %d after retries", user_id)
+            await update.message.reply_text(
+                "⏳ The AI service is temporarily busy. Please try again in a moment.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            logger.error("Model HTTP error for user %d: %s", user_id, exc, exc_info=True)
+            await update.message.reply_text(
+                "Sorry, something went wrong processing your request.",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+    except Exception as exc:
+        logger.error("Agent.run() failed for user %d: %s", user_id, exc, exc_info=True)
+        await update.message.reply_text(
+            "Sorry, something went wrong processing your request.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not reply:
+        logger.warning("Agent returned empty output for user %d", user_id)
+        await update.message.reply_text(
+            "I completed the action but had no message to send back.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Persist both turns
+    await history_manager.save_message(user_id=user_id, role="user", content=text)
+    await history_manager.save_message(user_id=user_id, role="assistant", content=reply)
+
+    html_reply = md_to_telegram_html(reply)
+    for chunk in _split_message(html_reply):
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    logger.debug("Sent agent reply to user %d", user_id)
 
 
 def _split_message(text: str, max_length: int = 4096) -> list[str]:
@@ -91,7 +207,7 @@ def make_message_handler(
     agent: Agent[AgentDeps, str],
     guarded_toolsets: list[GuardedToolset] | None = None,
     pending_confirmations: dict[int, tuple[int, str]] | None = None,
-):
+) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, None]]:
     """Create a Telegram message handler closure that captures app config and managers.
 
     Args:
@@ -140,86 +256,147 @@ def make_message_handler(
             await update.effective_chat.send_action(action=ChatAction.TYPING)
 
         text = update.message.text or ""
-
-        # Load user profile, seeding language for new users from Telegram locale
-        language_code = update.effective_user.language_code
-        user_profile = await profile_manager.get(user_id, language_code=language_code)
-
-        # Load and convert conversation history to PydanticAI ModelMessage objects
-        raw_history = await history_manager.get_history(user_id=user_id)
-        message_history = convert_history_to_messages(raw_history)
-
-        # Read and consume any pending confirmation from the inline keyboard
-        confirmed = False
-        if user_id in _pending_confirmations:
-            _media_id, _media_type = _pending_confirmations.pop(user_id)
-            confirmed = True
-            logger.info(
-                "Consumed pending confirmation for user",
-                extra={
-                    "user_id": user_id,
-                    "mediaId": _media_id,
-                    "mediaType": _media_type,
-                },
-            )
-
-        deps = AgentDeps(
-            config=config,
-            profile_manager=profile_manager,
-            history_manager=history_manager,
-            user_profile=user_profile,
-            guarded_toolsets=_guarded_toolsets,
-            telegram_bot=context.bot,
-            telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
-            confirmed=confirmed,
-            called_tools=set(),
-            role=user_profile.role,
+        await _invoke_agent(
+            text, update, context,
+            config, profile_manager, history_manager, agent,
+            _guarded_toolsets, _pending_confirmations,
         )
 
-        try:
-            result = await agent.run(text, deps=deps, message_history=message_history)
-            reply = result.output
-            logger.info("Agent output for user %d: %r", user_id, reply[:200] if reply else reply)
-        except ModelHTTPError as exc:
-            if exc.status_code == 429:
-                logger.warning("Rate limit exhausted for user %d after retries", user_id)
-                await update.message.reply_text(
-                    "⏳ The AI service is temporarily busy. Please try again in a moment.",
-                    parse_mode=ParseMode.HTML,
-                )
-            else:
-                logger.error("Model HTTP error for user %d: %s", user_id, exc, exc_info=True)
-                await update.message.reply_text(
-                    "Sorry, something went wrong processing your request.",
-                    parse_mode=ParseMode.HTML,
-                )
-            return
-        except Exception as exc:
-            logger.error("Agent.run() failed for user %d: %s", user_id, exc, exc_info=True)
-            await update.message.reply_text(
-                "Sorry, something went wrong processing your request.",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-
-        if not reply:
-            logger.warning("Agent returned empty output for user %d", user_id)
-            await update.message.reply_text(
-                "I completed the action but had no message to send back.",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-
-        # Persist both turns
-        await history_manager.save_message(user_id=user_id, role="user", content=text)
-        await history_manager.save_message(user_id=user_id, role="assistant", content=reply)
-
-        html_reply = md_to_telegram_html(reply)
-        for chunk in _split_message(html_reply):
-            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
-        logger.debug("Sent agent reply to user %d", user_id)
-
     return handle_message
+
+
+def make_voice_handler(
+    config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+    agent: Agent[AgentDeps, str],
+    guarded_toolsets: list[GuardedToolset] | None = None,
+) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, None]]:
+    """Create a Telegram voice message handler.
+
+    Downloads the OGG voice file from Telegram, POSTs it to the ASR service for
+    transcription, then forwards the transcribed text to the agent as a normal message.
+
+    Args:
+        config: Application configuration (contains asr_url and allowed_telegram_ids).
+        profile_manager: Manages user profile persistence.
+        history_manager: Manages conversation history persistence.
+        agent: The PydanticAI agent instance to use for inference.
+        guarded_toolsets: Optional list of GuardedToolset instances.
+
+    Returns:
+        An async handler coroutine compatible with python-telegram-bot.
+    """
+    _guarded_toolsets: list[GuardedToolset] = guarded_toolsets or []
+    # Voice handler has no shared pending_confirmations — always starts fresh.
+    _pending_confirmations: dict[int, tuple[int, str]] = {}
+
+    async def handle_voice(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle an incoming Telegram voice message.
+
+        Rejects unauthorized users before any ASR call, downloads the OGG file,
+        POSTs to the ASR service, and on success delegates to the normal agent flow.
+
+        Args:
+            update: The incoming Telegram update containing the voice message.
+            context: The callback context provided by python-telegram-bot.
+        """
+        if update.effective_user is None or update.message is None:
+            logger.warning("Received voice update with no user or message; ignoring.")
+            return
+
+        user_id = update.effective_user.id
+
+        # Authorization check BEFORE any ASR call
+        if user_id not in config.allowed_telegram_ids:
+            logger.info("Rejected unauthorized voice user %d", user_id)
+            await update.message.reply_text(_REJECTION_MESSAGE, parse_mode=ParseMode.HTML)
+            return
+
+        voice = update.message.voice
+        if voice is None:
+            return
+
+        logger.debug(
+            "Voice message received from user %d, duration=%ds",
+            user_id,
+            voice.duration,
+        )
+
+        # Show typing indicator during download + transcription
+        if update.effective_chat is not None:
+            await update.effective_chat.send_action(action=ChatAction.TYPING)
+
+        try:
+            # Download OGG voice file from Telegram
+            voice_file = await context.bot.get_file(voice.file_id)
+            ogg_bytes = await voice_file.download_as_bytearray()
+            logger.debug("Downloaded voice OGG: %d bytes from user %d", len(ogg_bytes), user_id)
+
+            # POST to ASR transcription service
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"{config.asr_url}/transcribe",
+                    files={"audio": ("voice.ogg", bytes(ogg_bytes), "audio/ogg")},
+                )
+                response.raise_for_status()
+                transcribed_text: str = response.json()["text"].strip()
+
+            logger.info(
+                "Transcribed voice for user %d: %r",
+                user_id,
+                transcribed_text[:100] if transcribed_text else "",
+            )
+
+            if not transcribed_text:
+                await update.message.reply_text(
+                    "🎙️ I couldn't make out what you said. Please try again.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            # Delegate to the shared module-level agent invocation logic
+            await _invoke_agent(
+                transcribed_text, update, context,
+                config, profile_manager, history_manager, agent,
+                _guarded_toolsets, _pending_confirmations,
+            )
+
+        except httpx.TimeoutException as exc:
+            logger.warning("ASR timeout for user %d: %s", user_id, exc)
+            await update.message.reply_text(
+                "🎙️ Voice transcription timed out. Please try again or type your message.",
+                parse_mode=ParseMode.HTML,
+            )
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "ASR HTTP error for user %d: status=%d %s",
+                user_id,
+                exc.response.status_code,
+                exc,
+            )
+            await update.message.reply_text(
+                "🎙️ Voice transcription is temporarily unavailable. Please type your message instead.",
+                parse_mode=ParseMode.HTML,
+            )
+        except httpx.RequestError as exc:
+            logger.error("ASR request error for user %d: %s", user_id, exc)
+            await update.message.reply_text(
+                "🎙️ Voice transcription is temporarily unavailable. Please type your message instead.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.error(
+                "Voice handler failed for user %d: %s", user_id, exc, exc_info=True
+            )
+            await update.message.reply_text(
+                "🎙️ Something went wrong processing your voice message.",
+                parse_mode=ParseMode.HTML,
+            )
+
+    return handle_voice
 
 
 def make_callback_handler(
@@ -406,6 +583,14 @@ def create_application(
         pending_confirmations,
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handler))
+    voice_handler = make_voice_handler(
+        config,
+        profile_manager,
+        history_manager,
+        agent,
+        _guarded_toolsets,
+    )
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
     callback_handler = make_callback_handler(
         config,
         _guarded_toolsets,

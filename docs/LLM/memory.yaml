@@ -8,11 +8,11 @@ last_updated: "2026-02-28"
 
 current_state:
   phase: 4
-  step: "4.3"
-  name: "Multi-User Support & GuardedToolset Stateless Refactor"
+  step: "4.4a+4.4b"
+  name: "Voice Message Support (Qwen3-ASR CPU Docker + Bot Integration)"
   status: "complete"
-  next_step: "4.4 — Voice Message Support (Qwen3-ASR-1.7B on CPU)"
-  description: "GuardedToolset made fully stateless — removed self.deps, self.confirmed, self.called_tools. call_tool() reads all user state from ctx.deps (per-user AgentDeps). confirmed, called_tools, role moved to AgentDeps. pending_confirmations dict in bot.py scopes confirmations per user_id. Permission levels added: admin/user/read_only roles on UserProfile. admin_telegram_ids in AppConfig. read_only blocked from request_media in GuardedToolset. 229 tests pass, asyncio.gather concurrent isolation test proves multi-user safety."
+  next_step: "5.1 — Glances Integration"
+  description: "Voice message support added. Qwen3-ASR-1.7B CPU-only Docker image (python:3.12-slim base, CPU torch wheel, transformers backend, NO GPU/CUDA). FastAPI server wraps model.transcribe() in thread pool executor. OGG accepted natively by qwen-asr. Bot downloads OGG from Telegram, POSTs to ASR container, feeds transcription to agent. Shared _invoke_agent() module-level function eliminates DRY violation between text and voice handlers. 244 tests pass."
   working_features:
     - "Config loading from .env via pydantic-settings"
     - "SQLite async database with conversations and user_profiles tables"
@@ -85,6 +85,16 @@ current_state:
   known_issues: []
 
 completed_steps:
+  - step: "4.4b"
+    name: "Qwen3-ASR Docker Image (CPU-only)"
+    date: "2026-03-02"
+    summary: "Custom CPU-only Docker image for Qwen3-ASR-1.7B. python:3.12-slim base (NOT nvidia/cuda). CPU-only PyTorch installed via --index-url https://download.pytorch.org/whl/cpu. qwen-asr transformers backend (NOT [vllm]). FastAPI server with /health and /transcribe endpoints. model.transcribe() run in asyncio thread pool executor to avoid blocking event loop. bfloat16 with float32 fallback (~3.4GB vs ~6.8GB RAM). OGG/Opus accepted natively via soundfile/librosa — no ffmpeg needed. Model pre-downloaded at build time. Added to docker-compose.yml with huggingface_cache volume, 120s healthcheck start_period, home-agent depends_on with service_healthy. 6 new test_docker.py tests. Official qwenllm/qwen3-asr:latest image was GPU-only (14.4GB, nvidia/cuda:12.8.0 base) and could not be used."
+    decision: "Build custom image rather than using official GPU-only image. Transformers backend over vLLM (no GPU). bfloat16 dtype to halve RAM usage on Core i3."
+  - step: "4.4a"
+    name: "Voice Message Bot Integration"
+    date: "2026-03-02"
+    summary: "Voice message handler wired into bot. asr_url added to AppConfig (default: http://qwen3-asr:8086). Core agent invocation logic extracted into module-level _invoke_agent() shared by both text and voice handlers (eliminates DRY violation). make_voice_handler() downloads OGG from Telegram, POSTs to ASR container via httpx, feeds transcription to _invoke_agent(). Handles: empty transcription, HTTPStatusError, RequestError, TimeoutException. ChatAction.TYPING shown during transcription. Unauthorized users rejected before ASR call. 8 test_voice.py tests. 244 tests total."
+    decision: "_invoke_agent() as module-level function allows both text and voice handlers to share the same agent invocation path without code duplication."
   - step: "4.3"
     name: "Multi-User Support & GuardedToolset Stateless Refactor"
     date: "2026-03-02"

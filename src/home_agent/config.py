@@ -25,6 +25,7 @@ class AppConfig(BaseSettings):
         llm_max_retries: Maximum number of retries on HTTP 429 rate limit errors.
         llm_retry_base_delay: Base delay in seconds for exponential backoff on retries.
         llm_retry_max_delay: Maximum delay in seconds for exponential backoff (caps the doubling).
+        asr_url: URL of the Qwen3-ASR transcription service.
     """
 
     telegram_bot_token: SecretStr
@@ -40,6 +41,8 @@ class AppConfig(BaseSettings):
     llm_retry_base_delay: float = 1.0
     llm_retry_max_delay: float = 30.0
     admin_telegram_ids: list[int] = Field(default=[])
+    asr_url: str = Field(default="http://qwen3-asr:8086")
+    """URL of the Qwen3-ASR transcription service."""
 
     model_config = SettingsConfigDict(
         env_file=".env",

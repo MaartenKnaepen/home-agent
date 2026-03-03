@@ -18,6 +18,8 @@ services:
     depends_on:
       seerr-mcp:
         condition: service_healthy
+      qwen3-asr:
+        condition: service_healthy
     networks:
       - home-agent-network
 
@@ -41,9 +43,35 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  qwen3-asr:
+    build:
+      context: ../mcp_servers/qwen3_asr
+      dockerfile: Dockerfile
+    container_name: qwen3-asr
+    environment:
+      - ASR_MODEL=Qwen/Qwen3-ASR-1.7B
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+    ports:
+      - "8086:8086"
+    volumes:
+      # Persist HuggingFace model cache across rebuilds
+      # (prevents re-downloading 3.4GB on every docker-compose build)
+      - huggingface_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - home-agent-network
+    # NO runtime: nvidia — CPU only
+
 volumes:
   home-agent-data:
     name: home-agent-data
+  huggingface_cache:
 
 networks:
   home-agent-network:

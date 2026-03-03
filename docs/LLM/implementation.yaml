@@ -876,40 +876,84 @@ phases:
       \ creation\n- test_multi_user.py — normal user gets 'user' role by default\n\
       - test_config.py — admin_telegram_ids parses from env var correctly\n"
   - files:
+    - mcp_servers/qwen3_asr/Dockerfile
+    - mcp_servers/qwen3_asr/server.py
+    - mcp_servers/qwen3_asr/requirements.txt
     - deployment/docker-compose.yml
+    - tests/test_docker.py
+    goal: Build a CPU-only Docker image for Qwen3-ASR-1.7B using the transformers
+      backend (NOT vLLM). Expose a simple FastAPI HTTP transcription endpoint.
+    id: '4.4b'
+    name: Qwen3-ASR Docker Image (CPU-only)
+    detailed_plan: docs/LLM/plans/step-4.4b.rovo-plan.yaml
+    notes: 'Official qwenllm/qwen3-asr:latest image is GPU-only (nvidia/cuda:12.8.0
+      base, vLLM backend, 14.4GB). Cannot run on Core i3 without NVIDIA GPU. Must
+      build custom slim image using transformers backend only. Key decisions: python:3.12-slim
+      base, CPU-only PyTorch wheel (--index-url https://download.pytorch.org/whl/cpu),
+      qwen-asr package (NOT qwen-asr[vllm]), FastAPI HTTP server. OGG confirmed
+      accepted natively by qwen-asr (soundfile/librosa). No ffmpeg needed. Model
+      bfloat16 ~3.4GB RAM. model.transcribe() is synchronous — run in thread pool
+      executor to avoid blocking FastAPI event loop. Model pre-downloaded at build
+      time via HF_HUB_OFFLINE=0 in build stage, then HF_HUB_OFFLINE=1 at runtime.'
+    scope: "- mcp_servers/qwen3_asr/Dockerfile:\n  - FROM python:3.12-slim\n  - Install\
+      \ CPU-only torch: pip install torch --index-url https://download.pytorch.org/whl/cpu\n\
+      \  - Install qwen-asr (NOT [vllm] variant) + fastapi + uvicorn + soundfile\n\
+      \  - Pre-download model at build time: python -c 'from qwen_asr import Qwen3ASRModel;\
+      \ Qwen3ASRModel.from_pretrained(\"Qwen/Qwen3-ASR-1.7B\")'\n  - No GPU flags,\
+      \ no NVIDIA runtime, no CUDA packages\n- mcp_servers/qwen3_asr/server.py:\n\
+      \  - FastAPI app with lifespan context manager loading model on startup\n  -\
+      \ POST /transcribe: accepts UploadFile (OGG/Opus), saves to temp file, calls\n\
+      \    model.transcribe(audio_path) in thread pool executor (avoid blocking)\n\
+      \  - Returns JSON {\"text\": \"transcribed text\"}\n  - GET /health: returns\
+      \ {\"status\": \"ok\", \"model\": ASR_MODEL}\n  - Cleanup temp files in finally\
+      \ block\n  - ASR_MODEL env var (default: Qwen/Qwen3-ASR-1.7B)\n  - dtype: torch.bfloat16\
+      \ (fallback to float32 if not supported by CPU)\n- mcp_servers/qwen3_asr/requirements.txt:\
+      \ torch (CPU), qwen-asr, fastapi, uvicorn, soundfile\n- deployment/docker-compose.yml:\
+      \ add qwen3-asr service with CPU-only build, port 8086,\n  huggingface_cache\
+      \ volume, healthcheck (start_period: 120s), restart: unless-stopped\n- home-agent\
+      \ service: add depends_on qwen3-asr service_healthy\n"
+    status: pending
+    test: "- test_docker.py — docker-compose has qwen3-asr service\n- test_docker.py\
+      \ — qwen3-asr service has no gpu/runtime: nvidia settings\n- test_docker.py\
+      \ — qwen3-asr service has healthcheck with start_period\n- test_docker.py —\
+      \ home-agent depends_on qwen3-asr\n- test_docker.py — qwen3-asr has huggingface_cache\
+      \ volume mounted\n- test_docker.py — ASR_MODEL env var set\n"
+  - files:
+    - src/home_agent/config.py
     - src/home_agent/bot.py
     - tests/test_voice.py
-    goal: User sends voice message; Qwen3-ASR-1.7B transcribes it locally on CPU;
-      transcribed text is fed to the agent as a normal message.
-    id: '4.4'
-    name: Voice Message Support
+    - tests/test_config.py
+    goal: Wire voice message support into the bot. Downloads OGG from Telegram, POSTs
+      to Qwen3-ASR container, receives transcribed text, feeds to agent as normal message.
+    id: '4.4a'
+    name: Voice Message Bot Integration
     detailed_plan: docs/LLM/plans/step-4.4.rovo-plan.yaml
-    notes: 'Qwen3-ASR-1.7B chosen for CPU deployment on home server (Core i3). Model
-      is ~1.7B parameters, runs on CPU with reasonable latency (~2-5s for short voice
-      messages). Deployed as a Docker sidecar container exposing a simple HTTP transcription
-      API. Bot downloads the OGG voice file from Telegram, sends to ASR container
-      as HTTP POST, receives transcribed text, feeds to agent. Model reference:
-      https://huggingface.co/Qwen/Qwen3-ASR-1.7B. Runs on CPU (no GPU required).
-      Audio format: Telegram sends voice as OGG/Opus — may need ffmpeg conversion
-      to WAV/MP3 depending on what Qwen3-ASR accepts. This needs investigation during
-      implementation.'
-    scope: "- deployment/docker-compose.yml: add qwen3-asr sidecar service\n  - Builds\
-      \ from a local Dockerfile in mcp_servers/qwen3_asr/ or uses a community image\n\
-      \  - CPU-only (no GPU), exposes port 8086\n  - Mounts model cache volume for\
-      \ persistence across restarts\n  - ASR_MODEL=Qwen/Qwen3-ASR-1.7B env var\n\
-      - ASR_URL added to AppConfig (default: http://qwen3-asr:8086)\n- bot.py: voice_message_handler()\n\
-      \  - Downloads OGG voice file from Telegram\n  - POSTs audio bytes to ASR container\
-      \ HTTP API\n  - Receives transcribed text\n  - Forwards to handle_message() as\
-      \ if it were a text message\n  - On ASR failure: sends user-friendly error message\n\
-      - Investigate: does Qwen3-ASR accept OGG/Opus directly or need WAV conversion?\n\
-      \  If conversion needed: use ffmpeg in the ASR container, not in bot.py\n- Typing\
-      \ indicator shown while transcription is in progress\n"
+    notes: 'Depends on step 4.4b (ASR container running at ASR_URL). Bot side is
+      purely HTTP client code — no audio processing. asr_url added to AppConfig
+      (default: http://qwen3-asr:8086). voice_message_handler() downloads OGG from
+      Telegram via context.bot.get_file(), POSTs multipart to ASR_URL/transcribe,
+      extracts text from JSON response, calls shared _run_agent_for_text(). Typing
+      indicator shown during transcription. Graceful error handling (ASR down, empty
+      transcription, timeout). Unauthorized users rejected before ASR call.'
+    scope: "- src/home_agent/config.py: add asr_url: str = Field(default='http://qwen3-asr:8086')\n\
+      - src/home_agent/bot.py: refactor handle_message to extract _run_agent_for_text(text,\
+      \ update, context, ...) inner function\n- src/home_agent/bot.py: add make_voice_handler()\
+      \ that:\n  - Checks allowed_telegram_ids (rejects unauthorized before ASR call)\n\
+      \  - Shows typing indicator (ChatAction.TYPING)\n  - Downloads OGG bytes: context.bot.get_file(voice.file_id)\
+      \ then download_as_bytearray()\n  - POSTs to config.asr_url/transcribe via httpx.AsyncClient(timeout=60)\n\
+      \  - Extracts transcribed text from response JSON\n  - Handles empty transcription:\
+      \ sends '\\U0001f3a4 I couldn't make out what you said.'\n  - Handles httpx.HTTPError:\
+      \ sends 'Voice transcription is temporarily unavailable.'\n  - Calls _run_agent_for_text(transcribed_text,\
+      \ ...)\n- src/home_agent/bot.py: register MessageHandler(filters.VOICE, make_voice_handler(...))\
+      \ in create_application()\n"
     status: pending
-    test: "- test_voice.py — voice_message_handler downloads OGG file from Telegram\n\
-      - test_voice.py — audio bytes POSTed to ASR_URL\n- test_voice.py — transcribed\
-      \ text forwarded to handle_message()\n- test_voice.py — ASR failure sends user-friendly\
-      \ error message\n- test_voice.py — typing indicator shown during transcription\n\
-      - test_docker.py — docker-compose has qwen3-asr service with correct env vars\n"
+    test: "- test_voice.py — unauthorized user rejected before ASR called\n- test_voice.py\
+      \ — typing indicator shown during transcription\n- test_voice.py — OGG bytes\
+      \ downloaded from Telegram and POSTed to ASR URL\n- test_voice.py — transcribed\
+      \ text passed to agent\n- test_voice.py — empty transcription sends user-friendly\
+      \ message\n- test_voice.py — httpx.HTTPError sends fallback error message\n\
+      - test_voice.py — timeout (httpx.TimeoutException) handled gracefully\n- test_config.py\
+      \ — asr_url has correct default value\n"
 - focus: Add system monitoring via Glances MCP server.
   id: 5
   name: Glances Integration

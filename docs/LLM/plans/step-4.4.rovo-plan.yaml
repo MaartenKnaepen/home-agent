@@ -1,10 +1,11 @@
 ---
-step: 4.4
-title: Voice Message Support (Qwen3-ASR-1.7B on CPU)
+step: 4.4a
+title: Voice Message Bot Integration
 goal: >
-  User sends a voice message in Telegram; a local Qwen3-ASR-1.7B Docker sidecar
-  transcribes it on CPU; the transcribed text is fed to the agent as a normal
-  text message. No GPU required. Expected latency: 2-5s on a Core i3.
+  Wire voice message support into the Telegram bot. Bot downloads OGG from
+  Telegram, POSTs to the Qwen3-ASR container (step 4.4b), receives transcribed
+  text, and feeds it to the agent as a normal message. No audio processing in
+  the bot — purely HTTP client code.
 
 approach: |
   Qwen3-ASR-1.7B is deployed as a Docker sidecar exposing a simple HTTP API.
