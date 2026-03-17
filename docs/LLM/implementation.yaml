@@ -624,7 +624,7 @@ phases:
       \ import agent, bot, or main. profile_tools (tools layer) does not import agent,\
       \ bot, or main. GuardedToolset is in mcp layer — it may import from profile\
       \ (for UserProfile type) but not from tools.\n"
-    status: pending
+    status: done
     test: "- test_guarded_toolset.py — request_media blocked when movie_quality is\
       \ None, returns error string mentioning set_movie_quality\n- test_guarded_toolset.py\
       \ — request_media blocked when series_quality is None for TV requests, returns\
@@ -686,7 +686,7 @@ phases:
       \ — no changes expected (mcp layer already forbidden from importing agent/bot/main)\
       \ but run lint-imports to confirm\n- Logging: bot.py logs when setting deps on\
       \ GuardedToolset. registry.py logs when wrapping toolsets.\n"
-    status: pending
+    status: done
     test: "- test_agent.py — create_agent() works with GuardedToolset instances\n\
       - test_agent.py — confirm_request tool is registered on the agent\n- test_integration.py\
       \ — full flow: user requests movie with no quality set → agent gets gate error\
@@ -722,13 +722,70 @@ phases:
       \ confirm_request at INFO\n- Update memory.yaml with Phase 3 completion state\
       \ and tool guard decisions\n- Update api.yaml with GuardedToolset and confirm_request\
       \ documentation\n- verify.sh passes: ty + lint-imports + pytest all green\n"
-    status: pending
+    status: done
     test: "- All verify.sh checks pass\n- test_integration.py — new user flow: request\
       \ movie → quality gate fires → user picks 4K → set_movie_quality called → request\
       \ succeeds\n- test_integration.py — quality change mid-conversation persists\n\
       - test_guarded_toolset.py — all edge cases covered including confirm_request\
       \ mediaId mismatch\n- test_guarded_toolset.py — logging assertions verify correct\
       \ log levels and messages\n- memory.yaml and api.yaml updated\n"
+  - files:
+    - src/home_agent/formatting.py
+    - src/home_agent/agent.py
+    - src/home_agent/db.py
+    - src/home_agent/bot.py
+    - src/home_agent/main.py
+    - src/home_agent/tools/telegram_tools.py
+    - src/home_agent/history.py
+    - tests/conftest.py
+    - tests/test_agent.py
+    - tests/test_bot.py
+    goal: Address code quality issues identified in the Phase 3 review — remove dead
+      code, reduce duplication, improve consistency, and fill test gaps.
+    id: '3.review'
+    name: Phase 3 Review Fixes
+    notes: 'Based on docs/LLM/reviews/phase-3-review.md. Excludes deployment README
+      cleanup (file removed).'
+    scope: |
+      HIGH PRIORITY:
+      - formatting.py: Remove unused type: ignore[type-arg] and type: ignore[attr-defined]
+        directives (lines 61, 180). Verify ty still passes without them.
+      - bot.py: make_callback_handler duplicates _invoke_agent() logic (profile loading,
+        history loading, confirmation consumption, AgentDeps construction, agent.run(),
+        error handling, reply formatting) in lines 484-539. Refactor to reuse
+        _invoke_agent() instead of duplicating.
+      MEDIUM PRIORITY:
+      - agent.py: Bundle max_retries, base_delay, max_delay parameters in create_agent()
+        into a RetryConfig dataclass to reduce parameter count.
+      - agent.py: Remove get_agent_toolsets() wrapper function (lines 195-204) — call
+        registry.get_toolsets() directly in main.py.
+      - db.py: Add explicit error handling with context logging in get_history() and
+        get_profile() for aiosqlite.OperationalError.
+      - test_agent.py: The system prompt extraction pattern (all_system_text from
+        SystemPromptPart) is copy-pasted across 10 tests. Extract a helper function
+        (e.g. extract_system_prompt_text(result)) and reuse it.
+      - test_agent.py + test_bot.py: ProfileManager(test_db) + HistoryManager(test_db)
+        is manually created in every test. Extract shared fixtures (profile_manager,
+        history_manager) into conftest.py.
+      - tests/conftest.py: Document the preferred test setup pattern (pre-save vs
+        auto-create) with a comment explaining when to use each.
+      LOW PRIORITY:
+      - bot.py: Add clarifying comment above _invoke_agent() calls in text and voice
+        handlers explaining the shared invocation path.
+      - telegram_tools.py: Change send_poster_image() debug log to info when posterPath
+        is None (line 118) for better observability.
+      - history.py: Add a doctest to sliding_window_processor() showing boundary
+        behavior with trailing incomplete pairs.
+    status: pending
+    test: |
+      - verify.sh passes: ty + lint-imports + pytest all green
+      - formatting.py has no type: ignore comments
+      - create_agent() accepts a RetryConfig instead of 3 separate retry params
+      - get_agent_toolsets() no longer exists
+      - db.py functions have try/except with logging for DB errors
+      - make_callback_handler confirm path reuses _invoke_agent() instead of duplicating
+      - test_agent.py system prompt tests use a shared helper, not copy-pasted extraction
+      - conftest.py has profile_manager and history_manager fixtures
 - focus: Rich Telegram UX, voice support, and multi-user capabilities.
   id: 4
   name: Polish & Advanced Features

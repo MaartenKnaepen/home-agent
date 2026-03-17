@@ -9,8 +9,10 @@ services:
     env_file:
       - ../.env
     environment:
-      # When running in Docker Compose, MCP server is reachable via service name
-      - MCP_HOST=seerr-mcp
+      # host networking: seerr-mcp and qwen3-asr are reachable via localhost
+      # (their ports are published to the host — 8085 and 8086 respectively)
+      - MCP_HOST=localhost
+      - ASR_URL=http://localhost:8086
       # - LLM_RETRY_MAX_DELAY=30.0
     volumes:
       - home-agent-data:/app/data
@@ -20,8 +22,11 @@ services:
         condition: service_healthy
       qwen3-asr:
         condition: service_healthy
-    networks:
-      - home-agent-network
+    # Use host networking to bypass Docker bridge NAT.
+    # This prevents TCP connection timeouts to api.telegram.org that occur
+    # when the agent takes >30s (long enough for the NAT table entry to expire).
+    # Trade-off: no network isolation, but acceptable for a home server bot.
+    network_mode: host
 
   seerr-mcp:
     build:

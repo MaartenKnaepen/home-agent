@@ -5,7 +5,6 @@ Covers whitelist enforcement, typing indicator, and agent response behaviour.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -64,12 +63,11 @@ def make_test_update(
 
 @pytest.mark.asyncio
 async def test_authorized_user_gets_agent_response(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Whitelisted user receives the agent's reply."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "Agent response"
 
@@ -87,12 +85,11 @@ async def test_authorized_user_gets_agent_response(
 
 @pytest.mark.asyncio
 async def test_unauthorized_user_gets_rejection(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Non-whitelisted user receives the rejection message and no typing action."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     update = make_test_update("hello", user_id=99999)
     context = MagicMock()
 
@@ -111,12 +108,11 @@ async def test_unauthorized_user_gets_rejection(
 
 @pytest.mark.asyncio
 async def test_typing_action_sent_before_response(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Typing indicator is sent before the agent reply for authorized users."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "pong"
 
@@ -135,12 +131,11 @@ async def test_typing_action_sent_before_response(
 
 @pytest.mark.asyncio
 async def test_new_user_gets_language_from_locale(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """New user with Dutch Telegram locale gets reply_language='Dutch'."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "Hallo!"
 
@@ -158,13 +153,12 @@ async def test_new_user_gets_language_from_locale(
 
 @pytest.mark.asyncio
 async def test_rate_limit_sends_busy_message(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Bot sends busy message when rate limit is exhausted."""
     from pydantic_ai.exceptions import ModelHTTPError
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
 
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(
@@ -185,11 +179,12 @@ async def test_rate_limit_sends_busy_message(
 
 
 @pytest.mark.asyncio
-async def test_long_reply_is_split(mock_config: AppConfig, test_db: Path) -> None:
+async def test_long_reply_is_split(
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+) -> None:
     """Agent reply exceeding 4096 chars is sent as multiple messages."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     long_reply = "a" * 5000
     mock_result = MagicMock()
     mock_result.output = long_reply
@@ -205,11 +200,12 @@ async def test_long_reply_is_split(mock_config: AppConfig, test_db: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_short_reply_not_split(mock_config: AppConfig, test_db: Path) -> None:
+async def test_short_reply_not_split(
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+) -> None:
     """Agent reply within 4096 chars is sent as a single message."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "Short reply"
 
@@ -225,13 +221,12 @@ async def test_short_reply_not_split(mock_config: AppConfig, test_db: Path) -> N
 
 @pytest.mark.asyncio
 async def test_existing_user_language_not_overwritten(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Existing user's reply_language is not overwritten on subsequent messages."""
     from home_agent.profile import resolve_language  # noqa: F401 – imported for clarity
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
 
     # Pre-create profile with French
     profile = await profile_manager.get(456, language_code="fr")
@@ -260,12 +255,11 @@ async def test_existing_user_language_not_overwritten(
 
 @pytest.mark.asyncio
 async def test_all_reply_text_calls_use_html_parse_mode(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """All reply_text calls use parse_mode=ParseMode.HTML."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "Hello world"
 
@@ -285,12 +279,11 @@ async def test_all_reply_text_calls_use_html_parse_mode(
 
 @pytest.mark.asyncio
 async def test_rejection_message_uses_html_parse_mode(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Rejection message for unauthorized users uses parse_mode=HTML."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_agent = MagicMock()
     handler = make_message_handler(mock_config, profile_manager, history_manager, mock_agent)
     update = make_test_update("hello", user_id=99999)
@@ -302,12 +295,11 @@ async def test_rejection_message_uses_html_parse_mode(
 
 @pytest.mark.asyncio
 async def test_error_message_uses_html_parse_mode(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Error messages use parse_mode=HTML."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_agent = MagicMock()
     mock_agent.run = AsyncMock(side_effect=Exception("boom"))
 
@@ -372,6 +364,7 @@ def make_callback_update(
     update.callback_query = query
     update.effective_user = user
     update.effective_chat = chat
+    update.message = None  # Callback query updates don't have a message
 
     context = MagicMock()
     context.bot = MagicMock()
@@ -382,12 +375,11 @@ def make_callback_update(
 
 @pytest.mark.asyncio
 async def test_callback_confirm_stores_pending_confirmation(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """'confirm:{mediaId}:{mediaType}' callback stores pending confirmation and runs agent."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "Request submitted!"
     mock_agent = MagicMock()
@@ -414,12 +406,11 @@ async def test_callback_confirm_stores_pending_confirmation(
 
 @pytest.mark.asyncio
 async def test_callback_cancel_removes_pending_confirmation(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """'cancel' callback removes any pending confirmation for the user."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     pending: dict = {123: (42, "movie")}  # Pre-existing pending confirmation
     mock_agent = MagicMock()
     handler = make_callback_handler(
@@ -437,12 +428,11 @@ async def test_callback_cancel_removes_pending_confirmation(
 
 @pytest.mark.asyncio
 async def test_callback_unauthorized_user_rejected(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Unauthorized user's callback query is rejected."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_agent = MagicMock()
     handler = make_callback_handler(
         mock_config, [], mock_agent, profile_manager, history_manager
@@ -459,12 +449,11 @@ async def test_callback_unauthorized_user_rejected(
 
 @pytest.mark.asyncio
 async def test_callback_confirm_runs_agent(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """'confirm' callback re-runs the agent with a synthetic message."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
     mock_result = MagicMock()
     mock_result.output = "Done!"
     mock_agent = MagicMock()

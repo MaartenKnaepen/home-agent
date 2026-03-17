@@ -160,9 +160,10 @@ class GuardedToolset(AbstractToolset[Any]):
 
             if confirmation_mode == "always" and not confirmed:
                 error_msg = (
-                    "STOP: Confirmation required. Show the user exactly what "
-                    "you're about to request (title, year, quality) and call "
-                    "confirm_request with mediaId and mediaType after they approve."
+                    "STOP: Confirmation required. Call send_confirmation_keyboard "
+                    "with mediaId, mediaType, title, year, and quality to show the "
+                    "user ✅ Yes / ❌ No buttons. Do NOT ask in plain text. "
+                    "Do NOT call request_media — the button handler does that automatically."
                 )
                 logger.warning(
                     "request_media blocked by confirmation gate",

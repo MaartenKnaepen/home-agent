@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from home_agent.agent import create_agent, get_agent_toolsets
+from home_agent.agent import RetryConfig, create_agent
 from home_agent.bot import create_application
 from home_agent.config import get_config
 from home_agent.db import init_db
@@ -70,15 +70,17 @@ async def _async_main() -> None:
     logger.info("Registered MCP servers: %s", registry.get_tool_names())
 
     # Create agent with MCP toolsets
-    toolsets = get_agent_toolsets(registry)
+    toolsets = registry.get_toolsets()
     logger.info("Creating agent with %d MCP toolsets", len(toolsets))
     logger.info("Using LLM model: %s", config.llm_model)
     agent = create_agent(
         toolsets=toolsets,
         model=config.llm_model,
-        max_retries=config.llm_max_retries,
-        base_delay=config.llm_retry_base_delay,
-        max_delay=config.llm_retry_max_delay,
+        retry_config=RetryConfig(
+            max_retries=config.llm_max_retries,
+            base_delay=config.llm_retry_base_delay,
+            max_delay=config.llm_retry_max_delay,
+        ),
     )
 
     # Open MCP connections once for the lifetime of the bot

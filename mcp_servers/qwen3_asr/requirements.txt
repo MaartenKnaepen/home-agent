@@ -2,5 +2,5 @@
 # Do NOT include torch here — it would pull the CUDA wheel
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
-qwen-asr>=0.1.0
+qwen-asr
 soundfile>=0.12.1

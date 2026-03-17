@@ -1,0 +1,676 @@
+---
+step: "3.review"
+title: "Phase 3 Review Fixes"
+goal: "Address code quality issues identified in the Phase 3 review — remove dead code, reduce duplication, improve consistency, and fill test gaps."
+
+approach: |
+  This step focuses on maintainability and test coverage improvements identified during Phase 3 review. The work is organized by priority:
+
+  **HIGH PRIORITY (blockers for production readiness):**
+  - Remove unused `type: ignore` directives in `formatting.py` that mask type checker issues.
+  - Eliminate the duplication in `bot.py`'s `make_callback_handler` which re-implements `_invoke_agent()` logic
+    instead of calling it directly. This duplication creates maintenance burden and divergence risk.
+
+  **MEDIUM PRIORITY (code quality and test patterns):**
+  - Bundle retry parameters in `agent.py`'s `create_agent()` into a `RetryConfig` dataclass to reduce
+    parameter count and improve readability.
+  - Remove the trivial `get_agent_toolsets()` wrapper in `agent.py` — call `registry.get_toolsets()` directly
+    in `main.py` instead.
+  - Add explicit error handling with logging in `db.py`'s `get_history()` and `get_profile()` for database errors.
+  - Extract the copy-pasted system prompt extraction pattern in `test_agent.py` into a shared helper function.
+  - Extract manually-created `ProfileManager(test_db)` and `HistoryManager(test_db)` into fixtures in `conftest.py`.
+
+  **LOW PRIORITY (documentation and observability):**
+  - Add clarifying comments in `bot.py` above `_invoke_agent()` calls explaining the shared invocation path.
+  - Change a debug log to info log in `telegram_tools.py` for better observability.
+  - Add a doctest to `history.py`'s `sliding_window_processor()` showing boundary behavior.
+
+  All changes maintain backward compatibility with the existing API and do not modify external behavior.
+
+---
+
+## Key Files
+
+### Modified Files
+- `src/home_agent/formatting.py` — Remove unused type: ignore directives (lines 60, 67, 116, 123, 126, 156, 164, 167, 177, 181)
+- `src/home_agent/agent.py` — Create RetryConfig dataclass, update create_agent() signature, remove get_agent_toolsets() function
+- `src/home_agent/db.py` — Add error handling in get_history() and get_profile()
+- `src/home_agent/bot.py` — Refactor make_callback_handler to reuse _invoke_agent(), add comments
+- `src/home_agent/main.py` — Call registry.get_toolsets() directly instead of get_agent_toolsets()
+- `src/home_agent/tools/telegram_tools.py` — Change debug log to info on line 118
+- `src/home_agent/history.py` — Add doctest to sliding_window_processor()
+- `tests/conftest.py` — Add profile_manager and history_manager fixtures, document fixture patterns
+- `tests/test_agent.py` — Extract system prompt extraction into helper function, use shared fixtures
+- `tests/test_bot.py` — Use shared fixtures from conftest.py
+
+---
+
+## Step-by-Step Implementation
+
+### 1. Create RetryConfig dataclass in agent.py
+
+**File:** `src/home_agent/agent.py`
+
+Add a `RetryConfig` dataclass to bundle the three retry parameters and simplify `create_agent()` signature:
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class RetryConfig:
+    """Configuration for exponential backoff retry behavior.
+
+    Attributes:
+        max_retries: Maximum number of retries on HTTP 429 rate limit errors.
+        base_delay: Base delay in seconds for exponential backoff. Doubles each retry.
+        max_delay: Maximum delay in seconds for exponential backoff. Caps the doubling.
+    """
+
+    max_retries: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 30.0
+```
+
+Then update the `create_agent()` signature to accept `retry_config: RetryConfig | None = None`:
+
+```python
+def create_agent(
+    toolsets: list[Any] | None = None,
+    model: str = "openrouter:qwen/qwq-32b:free",
+    retry_config: RetryConfig | None = None,
+) -> Agent[AgentDeps, str]:
+    """Create a PydanticAI agent with optional MCP toolsets.
+
+    Args:
+        toolsets: Optional list of FastMCPToolset instances for MCP servers.
+            If None, the agent runs without MCP tools (useful for tests).
+        model: PydanticAI model string to use. Defaults to qwen/qwq-32b:free.
+            Override via the LLM_MODEL environment variable in production.
+        retry_config: RetryConfig for exponential backoff on rate limits.
+            If None, defaults are used (3 retries, 1.0s base delay, 30.0s max).
+
+    Returns:
+        Configured Agent instance with system prompt and tools registered.
+    """
+    _retry_config = retry_config or RetryConfig()
+    from home_agent.models.retry_model import RetryingModel
+
+    retrying_model = RetryingModel(
+        model,
+        max_retries=_retry_config.max_retries,
+        base_delay=_retry_config.base_delay,
+        max_delay=_retry_config.max_delay,
+    )
+    # ... rest of the function unchanged
+```
+
+**Design notes:**
+- Keep the defaults the same as before for backward compatibility.
+- This reduces parameter count from 5 to 3 on the function signature.
+- Tests can now pass `retry_config=RetryConfig(max_retries=1)` for faster test execution if needed.
+
+### 2. Remove get_agent_toolsets() function
+
+**File:** `src/home_agent/agent.py`
+
+Delete the `get_agent_toolsets()` function (lines 195-204) entirely. It is just a trivial wrapper:
+
+```python
+# DELETE THIS FUNCTION
+def get_agent_toolsets(registry: MCPRegistry) -> list[Any]:
+    """Get MCP toolsets from the registry for agent construction.
+    ...
+    """
+    return registry.get_toolsets()
+```
+
+Also remove the import from the top of the file:
+
+```python
+# REMOVE: from home_agent.mcp.registry import MCPRegistry
+```
+
+(MCPRegistry is no longer used in agent.py after this change.)
+
+**Design notes:**
+- The function has no logic — it just passes through to `registry.get_toolsets()`.
+- Callers in `main.py` will call `registry.get_toolsets()` directly instead.
+
+### 3. Update main.py to call registry.get_toolsets() directly
+
+**File:** `src/home_agent/main.py`
+
+On line 72, change:
+
+```python
+# OLD:
+toolsets = get_agent_toolsets(registry)
+
+# NEW:
+toolsets = registry.get_toolsets()
+```
+
+Also remove the import on line 10:
+
+```python
+# REMOVE: from home_agent.agent import create_agent, get_agent_toolsets
+# ADD:
+from home_agent.agent import create_agent
+```
+
+And update the `create_agent()` call (lines 75-81) to use `RetryConfig`:
+
+```python
+from home_agent.agent import create_agent, RetryConfig
+
+# ...
+
+agent = create_agent(
+    toolsets=toolsets,
+    model=config.llm_model,
+    retry_config=RetryConfig(
+        max_retries=config.llm_max_retries,
+        base_delay=config.llm_retry_base_delay,
+        max_delay=config.llm_retry_max_delay,
+    ),
+)
+```
+
+### 4. Remove unused type: ignore directives in formatting.py
+
+**File:** `src/home_agent/formatting.py`
+
+Remove all `# type: ignore[...]` comments. The type checker should pass without them now.
+
+Current lines with type ignore directives:
+- Line 60: `def _render_token(token: object, out: list[str]) -> None:  # type: ignore[type-arg]`
+- Line 67: `t = token.type  # type: ignore[attr-defined]`
+- Line 116: `out.append(f"<code>{html.escape(token.content)}</code>")  # type: ignore[attr-defined]`
+- Line 123: `f\'{html.escape(token.content)}</code></pre>\\n\'  # type: ignore[attr-defined]`
+- Line 126: `out.append(f"<pre>{html.escape(token.content)}</pre>\\n")  # type: ignore[attr-defined]`
+- Line 156: `out.append(html.escape(token.content))  # type: ignore[attr-defined]`
+- Line 164: `if token.content.strip() in safe:  # type: ignore[attr-defined]`
+- Line 167: `out.append(token.content)  # type: ignore[attr-defined]`
+- Line 177: `out.append(html.escape(token.content))  # type: ignore[attr-defined]`
+- Line 181: `for child in token.children:  # type: ignore[attr-defined]`
+
+Replace these lines without the type: ignore comments. The code is already correct; the type checker was just being overly strict due to the `token: object` parameter type hint. This is acceptable because we're checking token types at runtime with `token.type`.
+
+**Design notes:**
+- The `token: object` parameter is intentional — we receive tokens of unknown structure from markdown-it-py and introspect them at runtime.
+- Runtime checks like `hasattr(token, "children")` and attribute access on dynamically-typed objects is fine.
+- The type ignore comments were masking the real issue (loose type on a third-party object).
+
+### 5. Add error handling with logging in db.py
+
+**File:** `src/home_agent/db.py`
+
+Update `get_history()` to wrap the database query in a try/except block:
+
+```python
+async def get_history(db_path: str | Path, *, user_id: int, limit: int | None = None) -> list[dict[str, str]]:
+    """Fetch recent conversation history for a user.
+
+    Args:
+        db_path: File path to the SQLite database.
+        user_id: Telegram user ID.
+        limit: Optional max number of messages to return.
+
+    Returns:
+        List of messages sorted from oldest to newest.
+
+    Raises:
+        RuntimeError: If database query fails.
+    """
+    if limit is not None:
+        query = """
+            SELECT role, content FROM (
+                SELECT role, content, id FROM conversations
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            ) ORDER BY id ASC
+            """
+        params = (user_id, limit)
+    else:
+        query = "SELECT role, content FROM conversations WHERE user_id = ? ORDER BY id ASC"
+        params = (user_id,)
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [{"role": row["role"], "content": row["content"]} for row in rows]
+    except aiosqlite.OperationalError as e:
+        logger.error("Database query failed for user %d: %s", user_id, e, exc_info=True)
+        raise RuntimeError(f"Failed to retrieve conversation history for user {user_id}") from e
+```
+
+Update `get_profile()` similarly:
+
+```python
+async def get_profile(db_path: str | Path, *, user_id: int) -> dict[str, Any] | None:
+    """Retrieve a stored user profile payload.
+
+    Args:
+        db_path: File path to the SQLite database.
+        user_id: Telegram user ID.
+
+    Returns:
+        Stored profile data, or None if missing.
+
+    Raises:
+        RuntimeError: If database query fails.
+    """
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            cursor = await db.execute("SELECT data FROM user_profiles WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return None
+        return json.loads(row[0])
+    except aiosqlite.OperationalError as e:
+        logger.error("Database query failed for user %d: %s", user_id, e, exc_info=True)
+        raise RuntimeError(f"Failed to retrieve profile for user {user_id}") from e
+```
+
+Don't forget to add the import at the top:
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+```
+
+**Design notes:**
+- `aiosqlite.OperationalError` covers most database issues (corrupted DB, I/O errors, etc.).
+- Logging at ERROR level makes these issues visible in production.
+- Raising `RuntimeError` signals to callers that the operation failed definitively.
+
+### 6. Extract system prompt helper in test_agent.py
+
+**File:** `tests/test_agent.py`
+
+Add a helper function at the top of the test file (after imports, before the first test):
+
+```python
+def extract_system_prompt_text(result) -> str:
+    """Extract concatenated system prompt text from agent result.
+
+    Helper to avoid copy-pasting the SystemPromptPart extraction pattern
+    across all system prompt tests.
+
+    Args:
+        result: The result object from agent.run() with all_messages().
+
+    Returns:
+        Concatenated text from all SystemPromptPart objects.
+    """
+    from pydantic_ai.messages import SystemPromptPart
+
+    return " ".join(
+        part.content
+        for msg in result.all_messages()
+        for part in msg.parts
+        if isinstance(part, SystemPromptPart)
+    )
+```
+
+Then replace all instances of the copy-pasted extraction code in tests with calls to this helper.
+
+For example, in `test_system_prompt_contains_user_profile` (around line 105), change:
+
+```python
+# OLD:
+all_system_text = " ".join(
+    part.content
+    for msg in result.all_messages()
+    for part in msg.parts
+    if isinstance(part, SystemPromptPart)
+)
+
+# NEW:
+all_system_text = extract_system_prompt_text(result)
+```
+
+Do the same for all 10 tests that use this pattern:
+- test_system_prompt_contains_user_profile (line 105)
+- test_dynamic_prompt_shows_not_set_when_quality_is_none (line 219)
+- test_dynamic_prompt_shows_language (line 255)
+- test_dynamic_prompt_shows_confirmation_mode (line 291)
+- test_dynamic_prompt_shows_quality_when_set (line 329)
+- test_static_prompt_contains_media_request_instructions (line 358)
+- test_static_prompt_contains_disambiguation_instructions (line 431)
+- test_static_prompt_handles_single_result_skip (line 461)
+- test_static_prompt_handles_franchise_disambiguation (line 487)
+- test_static_prompt_mentions_send_confirmation_keyboard (line 582)
+
+**Design notes:**
+- This reduces duplication from ~50 lines to just 1 import + 1 function call per test.
+- Makes changes to the extraction logic (if needed) easier — only one place to update.
+
+### 7. Add profile_manager and history_manager fixtures to conftest.py
+
+**File:** `tests/conftest.py`
+
+Add two new fixtures after the existing `test_db` fixture:
+
+```python
+@pytest.fixture
+async def profile_manager(test_db: Path) -> ProfileManager:
+    """Create a ProfileManager for a temporary test database.
+
+    Use this fixture in tests that need profile persistence without manually
+    constructing ProfileManager(test_db) in each test.
+
+    Args:
+        test_db: The temporary database path from the test_db fixture.
+
+    Returns:
+        A ProfileManager instance configured for the test database.
+    """
+    return ProfileManager(test_db)
+
+
+@pytest.fixture
+async def history_manager(test_db: Path) -> HistoryManager:
+    """Create a HistoryManager for a temporary test database.
+
+    Use this fixture in tests that need conversation history persistence without
+    manually constructing HistoryManager(test_db) in each test.
+
+    Args:
+        test_db: The temporary database path from the test_db fixture.
+
+    Returns:
+        A HistoryManager instance configured for the test database.
+    """
+    return HistoryManager(test_db)
+```
+
+Also add a comment documenting the fixture pattern:
+
+```python
+# ────────────────────────────────────────────────────────────────────────────
+# Test Setup Pattern Guide
+# ────────────────────────────────────────────────────────────────────────────
+#
+# ProfileManager & HistoryManager fixtures are available to all tests via
+# pytest dependency injection. When you need a fresh manager for a test:
+#
+#   @pytest.mark.asyncio
+#   async def test_something(profile_manager: ProfileManager) -> None:
+#       profile = await profile_manager.get(user_id=123)
+#       assert profile is not None
+#
+# Alternatively, if you need to customize the manager setup, construct it
+# manually in the test:
+#
+#   @pytest.mark.asyncio
+#   async def test_custom_setup(test_db: Path) -> None:
+#       profile_manager = ProfileManager(test_db)
+#       profile = await profile_manager.get(user_id=123)
+#
+# The `profile_manager` and `history_manager` fixtures are the preferred approach
+# for consistency across tests. Manual construction is only needed for edge cases.
+```
+
+Don't forget the imports at the top:
+
+```python
+from home_agent.history import HistoryManager
+from home_agent.profile import ProfileManager
+```
+
+**Design notes:**
+- These fixtures follow pytest's standard dependency injection pattern.
+- Tests can now request `profile_manager` and `history_manager` directly instead of constructing them.
+- Both fixtures depend on `test_db`, ensuring each test gets a clean database.
+
+### 8. Update test_agent.py to use shared fixtures
+
+**File:** `tests/test_agent.py`
+
+Update tests that manually create `ProfileManager(test_db)` and `HistoryManager(test_db)` to use the fixtures instead.
+
+For example, change the signature of `test_agent_has_update_user_note_tool`:
+
+```python
+# OLD:
+async def test_agent_has_update_user_note_tool(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """update_user_note tool is registered on the agent."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    ...
+
+# NEW:
+async def test_agent_has_update_user_note_tool(
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+) -> None:
+    """update_user_note tool is registered on the agent."""
+    # profile_manager and history_manager are injected from fixtures
+    ...
+```
+
+Do this for all tests in test_agent.py that currently have `test_db: Path` in their signature.
+
+Also remove the `from home_agent.history import HistoryManager` and `from home_agent.profile import ProfileManager` imports if they exist, since the fixtures are now used.
+
+**Design notes:**
+- This eliminates manual manager construction in ~20 test functions.
+- Each test still gets a fresh database thanks to the `test_db` fixture's per-test scope.
+
+### 9. Update test_bot.py to use shared fixtures
+
+**File:** `tests/test_bot.py`
+
+Similar to test_agent.py, update all test signatures to use the shared fixtures:
+
+```python
+# OLD:
+async def test_authorized_user_gets_agent_response(
+    mock_config: AppConfig, test_db: Path
+) -> None:
+    """Whitelisted user receives the agent's reply."""
+    profile_manager = ProfileManager(test_db)
+    history_manager = HistoryManager(test_db)
+    ...
+
+# NEW:
+async def test_authorized_user_gets_agent_response(
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
+) -> None:
+    """Whitelisted user receives the agent's reply."""
+    # profile_manager and history_manager are injected from fixtures
+    ...
+```
+
+Apply to all ~15+ tests in test_bot.py that currently construct these managers.
+
+### 10. Refactor make_callback_handler to reuse _invoke_agent()
+
+**File:** `src/home_agent/bot.py`
+
+The `make_callback_handler` function (lines 403-547) duplicates the core logic from `_invoke_agent()` in lines 484-539. Refactor it to call `_invoke_agent()` instead:
+
+Replace lines 484-539 in `make_callback_handler` with a call to the existing `_invoke_agent()`:
+
+```python
+# OLD (lines 484-539): [80 lines of duplicated code]
+# Profile loading, history loading, confirmation consumption, AgentDeps construction,
+# agent.run(), error handling, reply formatting — all duplicated.
+
+# NEW:
+# Reuse _invoke_agent() instead of duplicating
+await _invoke_agent(
+    "confirmed, please proceed with the request",
+    update, context,
+    config, profile_manager, history_manager, agent,
+    guarded_toolsets, _pending_confirmations,
+)
+```
+
+This is much simpler and avoids the duplication. The function `_invoke_agent()` already handles:
+- Profile loading
+- History loading
+- Confirmation consumption
+- AgentDeps construction
+- agent.run()
+- Error handling
+- Reply formatting
+
+**Design notes:**
+- After the callback edit_message_text (line 477-480), we immediately call _invoke_agent() with the synthetic "confirmed, please proceed with the request" message.
+- The pending_confirmations dict is passed to _invoke_agent(), which consumes it if present.
+- This eliminates ~80 lines of duplicated code and reduces maintenance burden.
+
+### 11. Add clarifying comments in bot.py
+
+**File:** `src/home_agent/bot.py`
+
+Add a comment above the first `_invoke_agent()` call in `make_message_handler`:
+
+```python
+# Line ~260, above the _invoke_agent() call:
+# Shared invocation path for text messages — handles profile loading, history,
+# agent execution, error handling, and reply formatting. Also used by voice and
+# callback handlers for consistency.
+await _invoke_agent(
+    text, update, context,
+    config, profile_manager, history_manager, agent,
+    _guarded_toolsets, _pending_confirmations,
+)
+```
+
+Add a similar comment above the `_invoke_agent()` call in `make_voice_handler`:
+
+```python
+# Line ~362, above the _invoke_agent() call:
+# Reuse the shared invocation path after transcription. Ensures voice messages
+# flow through the same agent pipeline as text messages.
+await _invoke_agent(
+    transcribed_text, update, context,
+    config, profile_manager, history_manager, agent,
+    _guarded_toolsets, _pending_confirmations,
+)
+```
+
+**Design notes:**
+- These comments make it clear to future maintainers that _invoke_agent() is the single source of truth for all message handling.
+
+### 12. Change log level in telegram_tools.py
+
+**File:** `src/home_agent/tools/telegram_tools.py`
+
+On line 118, change the debug log to info when posterPath is None:
+
+```python
+# OLD (line 118):
+logger.debug("send_poster_image called with no posterPath — skipping")
+
+# NEW:
+logger.info("send_poster_image called with no posterPath — skipping")
+```
+
+**Design notes:**
+- When posterPath is None, this is normal behavior (not all media has a poster).
+- Info level makes it visible in standard production logs for better observability of what's happening.
+
+### 13. Add doctest to history.py
+
+**File:** `src/home_agent/history.py`
+
+Add a doctest to `sliding_window_processor()` showing boundary behavior:
+
+```python
+def sliding_window_processor(
+    *, n: int
+) -> Callable[[list[ModelMessage]], list[ModelMessage]]:
+    """Create a history processor that keeps only the last N message pairs.
+
+    Returns a processor compatible with PydanticAI's history_processors.
+    Each 'pair' is a ModelRequest followed by its ModelResponse.
+    Tool-call/tool-result pairs are never split across the window boundary.
+
+    Args:
+        n: Number of message pairs to retain.
+
+    Returns:
+        A processor function that trims history to the last N pairs.
+
+    Examples:
+        >>> from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
+        >>> processor = sliding_window_processor(n=2)
+        >>> # Create 3 message pairs (6 messages total)
+        >>> msgs = [
+        ...     ModelRequest(parts=[UserPromptPart(content="Q1")]),
+        ...     ModelResponse(parts=[TextPart(content="A1")]),
+        ...     ModelRequest(parts=[UserPromptPart(content="Q2")]),
+        ...     ModelResponse(parts=[TextPart(content="A2")]),
+        ...     ModelRequest(parts=[UserPromptPart(content="Q3")]),
+        ...     ModelResponse(parts=[TextPart(content="A3")]),
+        ... ]
+        >>> result = processor(msgs)
+        >>> # Only the last 2 pairs (4 messages) are kept
+        >>> len(result)
+        4
+        >>> isinstance(result[0], ModelRequest)
+        True
+        >>> result[0].parts[0].content
+        'Q2'
+        >>> isinstance(result[-1], ModelResponse)
+        True
+        >>> result[-1].parts[0].content
+        'A3'
+    """
+```
+
+**Design notes:**
+- Doctests document expected behavior and serve as tests.
+- They verify the sliding window keeps exactly N pairs (2n messages).
+- They show that the processor preserves request/response order.
+
+### 14. Update test signatures in test_agent.py
+
+**File:** `tests/test_agent.py`
+
+The `make_agent_deps()` helper (lines 26-54) takes `profile_manager` and `history_manager` as parameters. Update all calls to use the fixture-injected versions.
+
+Actually, since `make_agent_deps()` takes these managers as parameters and is used in many tests, we can keep it as-is. The tests will now pass the fixtures to it:
+
+```python
+# OLD:
+profile_manager = ProfileManager(test_db)
+history_manager = HistoryManager(test_db)
+deps = make_agent_deps(mock_config, profile_manager, history_manager)
+
+# NEW:
+deps = make_agent_deps(mock_config, profile_manager, history_manager)
+# (profile_manager and history_manager come from fixtures)
+```
+
+---
+
+## Success Criteria
+
+- All verify.sh checks pass: `ty` (type checker), `lint-imports`, and `pytest` all return exit code 0
+- `formatting.py` has no `type: ignore` comments
+- `create_agent()` accepts a `RetryConfig` instead of 3 separate retry params
+- `get_agent_toolsets()` function no longer exists in `agent.py`
+- `main.py` calls `registry.get_toolsets()` directly
+- `db.py` functions have `try/except` with logging for `aiosqlite.OperationalError`
+- `make_callback_handler` confirm path reuses `_invoke_agent()` instead of duplicating (lines 484-539 removed/replaced)
+- `test_agent.py` system prompt tests use `extract_system_prompt_text()` helper, not copy-pasted extraction
+- `conftest.py` has `profile_manager` and `history_manager` fixtures with documentation
+- `test_agent.py` and `test_bot.py` tests use the shared fixtures from `conftest.py`
+- Clarifying comments added above `_invoke_agent()` calls in `bot.py`
+- `telegram_tools.py` debug log changed to info log on line 118
+- `history.py` `sliding_window_processor()` has doctest

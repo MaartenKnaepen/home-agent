@@ -101,6 +101,29 @@ def sliding_window_processor(
 
     Returns:
         A processor function that trims history to the last N pairs.
+
+    Examples:
+        >>> from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart, TextPart
+        >>> processor = sliding_window_processor(n=2)
+        >>> msgs = [
+        ...     ModelRequest(parts=[UserPromptPart(content="Q1")]),
+        ...     ModelResponse(parts=[TextPart(content="A1")], model_name="test"),
+        ...     ModelRequest(parts=[UserPromptPart(content="Q2")]),
+        ...     ModelResponse(parts=[TextPart(content="A2")], model_name="test"),
+        ...     ModelRequest(parts=[UserPromptPart(content="Q3")]),
+        ...     ModelResponse(parts=[TextPart(content="A3")], model_name="test"),
+        ... ]
+        >>> result = processor(msgs)
+        >>> len(result)
+        4
+        >>> isinstance(result[0], ModelRequest)
+        True
+        >>> result[0].parts[0].content
+        'Q2'
+        >>> isinstance(result[-1], ModelResponse)
+        True
+        >>> result[-1].parts[0].content
+        'A3'
     """
 
     def processor(messages: list[ModelMessage]) -> list[ModelMessage]:

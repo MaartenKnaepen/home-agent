@@ -342,7 +342,7 @@ async def test_bot_passes_guarded_toolsets_in_agent_deps(
 ) -> None:
     """make_message_handler includes guarded_toolsets in the AgentDeps passed to agent.run().
 
-    Verifies the confirm_request tool will have access to the GuardedToolsets
+    Verifies that GuardedToolset instances are forwarded correctly
     via ctx.deps.guarded_toolsets.
     """
     from unittest.mock import MagicMock
@@ -406,48 +406,6 @@ async def test_bot_no_guarded_toolsets_still_works(
     call_args = mock_agent.run.call_args
     deps = call_args[1]["deps"]
     assert deps.guarded_toolsets == []
-
-
-async def test_confirm_request_tool_end_to_end(
-    integration_config: AppConfig,
-    integration_db: Path,
-) -> None:
-    """confirm_request tool called by real agent sets deps.confirmed = True.
-
-    Uses PydanticAI's TestModel to force a confirm_request call and verifies
-    that deps.confirmed is True after the agent run (stateless GuardedToolset).
-    """
-    profile_manager = ProfileManager(db_path=integration_db)
-    history_manager = HistoryManager(db_path=integration_db)
-
-    profile = UserProfile(
-        user_id=12345,
-        created_at=datetime.now(),
-        updated_at=datetime.now(),
-        media_preferences=MediaPreferences(movie_quality="4k"),
-        confirmation_mode="always",
-    )
-    await profile_manager.save(profile)
-
-    agent_instance = create_agent()
-    m = TestModel(call_tools=["confirm_request"])
-
-    deps = AgentDeps(
-        config=integration_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        confirmed=False,
-        called_tools=set(),
-        role="user",
-    )
-
-    with agent_instance.override(model=m):
-        async with agent_instance:
-            await agent_instance.run("yes, confirm the request", deps=deps)
-
-    # confirm_request sets deps.confirmed = True (stateless — no GuardedToolset mutation)
-    assert deps.confirmed is True
 
 
 async def test_e2e_new_user_quality_gate_blocks_request(

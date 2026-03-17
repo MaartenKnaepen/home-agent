@@ -15,6 +15,7 @@ import html
 import logging
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def md_to_telegram_html(text: str) -> str:
         return html.escape(str(text))
 
 
-def _render_tokens(tokens: list) -> str:
+def _render_tokens(tokens: list[Token]) -> str:
     """Walk a markdown-it-py token list and emit Telegram HTML.
 
     Args:
@@ -58,17 +59,17 @@ def _render_tokens(tokens: list) -> str:
     return "".join(out)
 
 
-def _render_token(token: object, out: list[str]) -> None:  # type: ignore[type-arg]
+def _render_token(token: Token, out: list[str]) -> None:
     """Render a single markdown-it-py token to Telegram-safe HTML.
 
     Args:
         token: A Token object from markdown-it-py.
         out: Output list to append rendered HTML fragments to.
     """
-    t = token.type  # type: ignore[attr-defined]
+    t = token.type
 
-    if t == "inline" and token.children:  # type: ignore[attr-defined]
-        for child in token.children:  # type: ignore[attr-defined]
+    if t == "inline" and token.children:
+        for child in token.children:
             _render_token(child, out)
 
     elif t == "paragraph_open":
@@ -114,23 +115,23 @@ def _render_token(token: object, out: list[str]) -> None:  # type: ignore[type-a
         out.append("</s>")
 
     elif t == "code_inline":
-        out.append(f"<code>{html.escape(token.content)}</code>")  # type: ignore[attr-defined]
+        out.append(f"<code>{html.escape(token.content)}</code>")
 
     elif t == "fence":
-        lang = token.info.strip() if token.info else ""  # type: ignore[attr-defined]
+        lang = token.info.strip() if token.info else ""
         if lang:
             out.append(
                 f'<pre><code class="{html.escape(lang)}">'
-                f'{html.escape(token.content)}</code></pre>\n'  # type: ignore[attr-defined]
+                f'{html.escape(token.content)}</code></pre>\n'
             )
         else:
-            out.append(f"<pre>{html.escape(token.content)}</pre>\n")  # type: ignore[attr-defined]
+            out.append(f"<pre>{html.escape(token.content)}</pre>\n")
 
     elif t == "code_block":
-        out.append(f"<pre>{html.escape(token.content)}</pre>\n")  # type: ignore[attr-defined]
+        out.append(f"<pre>{html.escape(token.content)}</pre>\n")
 
     elif t == "link_open":
-        attrs = token.attrs or {}  # type: ignore[attr-defined]
+        attrs = token.attrs or {}
         if isinstance(attrs, dict):
             href = html.escape(str(attrs.get("href", "")))
         else:
@@ -154,7 +155,7 @@ def _render_token(token: object, out: list[str]) -> None:  # type: ignore[type-a
         out.append("──────────\n")
 
     elif t == "text":
-        out.append(html.escape(token.content))  # type: ignore[attr-defined]
+        out.append(html.escape(token.content))
 
     elif t == "html_inline":
         # Pass through only safe Telegram tags, escape everything else
@@ -162,10 +163,10 @@ def _render_token(token: object, out: list[str]) -> None:  # type: ignore[type-a
             "<b>", "</b>", "<i>", "</i>", "<u>", "</u>",
             "<s>", "</s>", "<code>", "</code>",
         }
-        if token.content.strip() in safe:  # type: ignore[attr-defined]
-            out.append(token.content)  # type: ignore[attr-defined]
+        if token.content.strip() in safe:
+            out.append(token.content)
         else:
-            out.append(html.escape(token.content))  # type: ignore[attr-defined]
+            out.append(html.escape(token.content))
 
     elif t == "blockquote_open":
         out.append("<blockquote>")
@@ -175,11 +176,11 @@ def _render_token(token: object, out: list[str]) -> None:  # type: ignore[type-a
 
     elif t == "html_block":
         # Escape raw HTML blocks — Telegram does not support arbitrary HTML
-        out.append(html.escape(token.content))  # type: ignore[attr-defined]
+        out.append(html.escape(token.content))
 
-    elif hasattr(token, "children") and token.children:  # type: ignore[attr-defined]
+    elif hasattr(token, "children") and token.children:
         # Unknown token types with children: recurse
-        for child in token.children:  # type: ignore[attr-defined]
+        for child in token.children:
             _render_token(child, out)
 
     # All other token types (images, tables, etc.) are silently skipped

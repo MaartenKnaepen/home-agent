@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 
 async def init_db(db_path: str | Path) -> None:
@@ -70,6 +73,9 @@ async def get_history(db_path: str | Path, *, user_id: int, limit: int | None = 
 
     Returns:
         List of messages sorted from oldest to newest.
+
+    Raises:
+        RuntimeError: If database query fails.
     """
     if limit is not None:
         query = """
@@ -84,12 +90,16 @@ async def get_history(db_path: str | Path, *, user_id: int, limit: int | None = 
     else:
         query = "SELECT role, content FROM conversations WHERE user_id = ? ORDER BY id ASC"
         params = (user_id,)
-    async with aiosqlite.connect(db_path) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(query, params)
-        rows = await cursor.fetchall()
-        await cursor.close()
-    return [{"role": row["role"], "content": row["content"]} for row in rows]
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [{"role": row["role"], "content": row["content"]} for row in rows]
+    except aiosqlite.OperationalError as e:
+        logger.error("Database query failed for user %d: %s", user_id, e, exc_info=True)
+        raise RuntimeError(f"Failed to retrieve conversation history for user {user_id}") from e
 
 
 async def save_profile(db_path: str | Path, *, user_id: int, data: dict[str, Any]) -> None:
@@ -118,11 +128,18 @@ async def get_profile(db_path: str | Path, *, user_id: int) -> dict[str, Any] | 
 
     Returns:
         Stored profile data, or None if missing.
+
+    Raises:
+        RuntimeError: If database query fails.
     """
-    async with aiosqlite.connect(db_path) as db:
-        cursor = await db.execute("SELECT data FROM user_profiles WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        await cursor.close()
-    if row is None:
-        return None
-    return json.loads(row[0])
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            cursor = await db.execute("SELECT data FROM user_profiles WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return None
+        return json.loads(row[0])
+    except aiosqlite.OperationalError as e:
+        logger.error("Database query failed for user %d: %s", user_id, e, exc_info=True)
+        raise RuntimeError(f"Failed to retrieve profile for user {user_id}") from e

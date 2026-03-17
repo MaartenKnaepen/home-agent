@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from home_agent.agent import AgentDeps, create_agent, get_agent_toolsets
+from home_agent.agent import AgentDeps, create_agent
 from home_agent.config import AppConfig
 from home_agent.history import HistoryManager
 from home_agent.profile import ProfileManager, UserProfile
@@ -22,6 +22,28 @@ from home_agent.profile import ProfileManager, UserProfile
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def extract_system_prompt_text(result) -> str:
+    """Extract concatenated system prompt text from agent result.
+
+    Helper to avoid copy-pasting the SystemPromptPart extraction pattern
+    across all system prompt tests.
+
+    Args:
+        result: The result object from agent.run() with all_messages().
+
+    Returns:
+        Concatenated text from all SystemPromptPart objects.
+    """
+    from pydantic_ai.messages import SystemPromptPart
+
+    return " ".join(
+        part.content
+        for msg in result.all_messages()
+        for part in msg.parts
+        if isinstance(part, SystemPromptPart)
+    )
 
 
 def make_agent_deps(
@@ -68,11 +90,11 @@ def test_agent_instantiates() -> None:
 
 
 async def test_agent_has_update_user_note_tool(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """update_user_note tool is registered on the agent."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -87,13 +109,11 @@ async def test_agent_has_update_user_note_tool(
 
 
 async def test_system_prompt_contains_user_profile(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Dynamic system prompt includes the user's name."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -102,22 +122,16 @@ async def test_system_prompt_contains_user_profile(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    # The system prompt parts are embedded in the ModelRequest of all_messages()
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     assert "Alice" in all_system_text
 
 
 async def test_update_user_note_tool_persists_note(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Calling update_user_note saves the note to the user profile via ProfileManager."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager, user_id=42)
 
     # Save the initial profile so ProfileManager.save() can update it
@@ -138,11 +152,11 @@ async def test_update_user_note_tool_persists_note(
 
 
 async def test_update_user_note_updates_deps(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """update_user_note tool updates ctx.deps.user_profile.notes."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager, user_id=55)
     await profile_manager.save(deps.user_profile)
 
@@ -156,11 +170,11 @@ async def test_update_user_note_updates_deps(
 
 
 async def test_agent_returns_output(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Agent returns the custom_output_text when configured on TestModel."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -172,31 +186,14 @@ async def test_agent_returns_output(
     assert result.output == "Hello from the agent!"
 
 
-def test_get_agent_toolsets_delegates_to_registry() -> None:
-    """get_agent_toolsets() returns whatever registry.get_toolsets() returns."""
-    from unittest.mock import MagicMock
-
-    from home_agent.mcp.registry import MCPRegistry
-
-    mock_registry = MagicMock(spec=MCPRegistry)
-    mock_registry.get_toolsets.return_value = ["toolset_a", "toolset_b"]
-
-    result = get_agent_toolsets(mock_registry)
-
-    mock_registry.get_toolsets.assert_called_once()
-    assert result == ["toolset_a", "toolset_b"]
-
-
 async def test_dynamic_prompt_shows_not_set_when_quality_is_none(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Dynamic prompt shows 'NOT SET' when movie/series quality is not configured."""
-    from pydantic_ai.messages import SystemPromptPart
-
     from home_agent.profile import MediaPreferences
 
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     # Profile with no quality set
     profile = UserProfile(
         user_id=99,
@@ -217,23 +214,16 @@ async def test_dynamic_prompt_shows_not_set_when_quality_is_none(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     assert "NOT SET" in all_system_text
 
 
 async def test_dynamic_prompt_shows_language(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Dynamic prompt includes the user's reply language."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     profile = UserProfile(
         user_id=100,
         created_at=datetime.now(),
@@ -253,23 +243,16 @@ async def test_dynamic_prompt_shows_language(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     assert "Dutch" in all_system_text
 
 
 async def test_dynamic_prompt_shows_confirmation_mode(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Dynamic prompt includes the confirmation mode."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     profile = UserProfile(
         user_id=101,
         created_at=datetime.now(),
@@ -289,25 +272,18 @@ async def test_dynamic_prompt_shows_confirmation_mode(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     assert "never" in all_system_text
 
 
 async def test_dynamic_prompt_shows_quality_when_set(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Dynamic prompt shows quality values when they are configured."""
-    from pydantic_ai.messages import SystemPromptPart
-
     from home_agent.profile import MediaPreferences
 
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     profile = UserProfile(
         user_id=102,
         created_at=datetime.now(),
@@ -327,12 +303,7 @@ async def test_dynamic_prompt_shows_quality_when_set(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     assert "4k" in all_system_text
     assert "1080p" in all_system_text
     # The dynamic portion should NOT contain the "NOT SET" placeholder phrase
@@ -341,13 +312,11 @@ async def test_dynamic_prompt_shows_quality_when_set(
 
 
 async def test_static_prompt_contains_media_request_instructions(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Static system prompt contains key media request instructions."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -356,12 +325,7 @@ async def test_static_prompt_contains_media_request_instructions(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     # Key structural instructions from the numbered media request flow
     assert "search_media" in all_system_text
     assert "SEARCH FIRST" in all_system_text
@@ -371,7 +335,9 @@ async def test_static_prompt_contains_media_request_instructions(
 
 
 async def test_set_movie_quality_tool_is_callable_when_quality_unset(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Agent can call set_movie_quality tool when movie quality is not set.
 
@@ -379,9 +345,6 @@ async def test_set_movie_quality_tool_is_callable_when_quality_unset(
     agent deciding to ask for quality during a media request.
     """
     from home_agent.profile import MediaPreferences
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     profile = UserProfile(
         user_id=103,
         created_at=datetime.now(),
@@ -414,13 +377,11 @@ async def test_set_movie_quality_tool_is_callable_when_quality_unset(
 
 
 async def test_static_prompt_contains_disambiguation_instructions(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Static system prompt contains disambiguation instructions."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -429,12 +390,7 @@ async def test_static_prompt_contains_disambiguation_instructions(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     # Disambiguation instructions must be present
     assert "DISAMBIGUATE" in all_system_text
     assert "numbered list" in all_system_text
@@ -444,13 +400,11 @@ async def test_static_prompt_contains_disambiguation_instructions(
 
 
 async def test_static_prompt_handles_single_result_skip(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Static system prompt instructs agent to skip disambiguation for single clear match."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -459,24 +413,17 @@ async def test_static_prompt_handles_single_result_skip(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     # Single match should skip to quality step
     assert "ONE clear match" in all_system_text or "only ONE" in all_system_text
 
 
 async def test_static_prompt_handles_franchise_disambiguation(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """Static system prompt instructs agent to disambiguate sequels and franchises."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -485,18 +432,13 @@ async def test_static_prompt_handles_franchise_disambiguation(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
+    all_system_text = extract_system_prompt_text(result)
     # Franchise/sequel handling must be mentioned
     assert "sequels" in all_system_text or "franchise" in all_system_text
 
 
 # ---------------------------------------------------------------------------
-# GuardedToolset and confirm_request tests
+# GuardedToolset tests
 # ---------------------------------------------------------------------------
 
 
@@ -535,71 +477,12 @@ def test_create_agent_with_none_toolsets() -> None:
     assert agent_instance.deps_type is AgentDeps
 
 
-async def test_confirm_request_tool_is_registered(
-    mock_config: AppConfig, test_db: Path
-) -> None:
-    """confirm_request tool is registered on the agent and visible to the model."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-    deps = make_agent_deps(mock_config, profile_manager, history_manager)
-
-    agent_instance = create_agent()
-    m = TestModel()
-    with agent_instance.override(model=m):
-        async with agent_instance:
-            await agent_instance.run("hello", deps=deps)
-
-    assert m.last_model_request_parameters is not None
-    tool_names = [t.name for t in m.last_model_request_parameters.function_tools]
-    assert "confirm_request" in tool_names
-
-
-async def test_confirm_request_tool_sets_confirmed_in_deps(
-    mock_config: AppConfig, test_db: Path
-) -> None:
-    """confirm_request tool sets deps.confirmed = True (stateless: no GuardedToolset mutation).
-
-    GuardedToolset is now stateless — confirm_request sets ctx.deps.confirmed = True
-    in AgentDeps (created fresh per message), not a flag on the toolset singleton.
-    """
-    from home_agent.profile import MediaPreferences
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-
-    profile = UserProfile(
-        user_id=200,
-        created_at=datetime.now(),
-        updated_at=datetime.now(),
-        media_preferences=MediaPreferences(movie_quality="4k"),
-        confirmation_mode="always",
-    )
-    deps = AgentDeps(
-        config=mock_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        confirmed=False,
-        called_tools=set(),
-        role="user",
-    )
-
-    agent_instance = create_agent()
-    m = TestModel(call_tools=["confirm_request"])
-    with agent_instance.override(model=m):
-        async with agent_instance:
-            await agent_instance.run("yes, confirm it", deps=deps)
-
-    # confirm_request sets deps.confirmed = True (not on any toolset)
-    assert deps.confirmed is True
-
-
 async def test_all_profile_tools_registered(
-    mock_config: AppConfig, test_db: Path
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
     """All expected profile tools are registered on the agent."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -616,20 +499,19 @@ async def test_all_profile_tools_registered(
         "set_series_quality",
         "set_reply_language",
         "set_confirmation_mode",
-        "confirm_request",
+        "send_confirmation_keyboard",
+        "send_poster_image",
     ]
     for tool in expected_tools:
         assert tool in tool_names, f"Expected tool '{tool}' not registered"
 
 
-async def test_static_prompt_mentions_confirm_request_tool(
-    mock_config: AppConfig, test_db: Path
+async def test_static_prompt_mentions_send_confirmation_keyboard(
+    mock_config: AppConfig,
+    profile_manager: ProfileManager,
+    history_manager: HistoryManager,
 ) -> None:
-    """Static system prompt mentions the confirm_request tool."""
-    from pydantic_ai.messages import SystemPromptPart
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
+    """Static system prompt mentions send_confirmation_keyboard (not confirm_request)."""
     deps = make_agent_deps(mock_config, profile_manager, history_manager)
 
     agent_instance = create_agent()
@@ -638,10 +520,6 @@ async def test_static_prompt_mentions_confirm_request_tool(
         async with agent_instance:
             result = await agent_instance.run("hello", deps=deps)
 
-    all_system_text = " ".join(
-        part.content
-        for msg in result.all_messages()
-        for part in msg.parts
-        if isinstance(part, SystemPromptPart)
-    )
-    assert "confirm_request" in all_system_text
+    all_system_text = extract_system_prompt_text(result)
+    assert "send_confirmation_keyboard" in all_system_text
+    assert "confirm_request" not in all_system_text

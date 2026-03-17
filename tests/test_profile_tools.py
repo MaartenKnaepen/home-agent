@@ -19,7 +19,6 @@ from home_agent.config import AppConfig
 from home_agent.history import HistoryManager
 from home_agent.profile import MediaPreferences, ProfileManager, UserProfile
 from home_agent.tools.profile_tools import (
-    confirm_request,
     set_confirmation_mode,
     set_movie_quality,
     set_reply_language,
@@ -261,68 +260,7 @@ async def test_profile_tools_registered_on_agent(
     assert "set_series_quality" in tool_names
     assert "set_reply_language" in tool_names
     assert "set_confirmation_mode" in tool_names
-    assert "confirm_request" in tool_names
-
-
-# ---------------------------------------------------------------------------
-# confirm_request
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_confirm_request_sets_confirmed_in_deps(
-    mock_config: AppConfig, test_db: Path
-) -> None:
-    """confirm_request sets ctx.deps.confirmed = True (stateless — no GuardedToolset mutation)."""
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-    profile = make_test_profile(user_id=60)
-    await profile_manager.save(profile)
-
-    deps = AgentDeps(
-        config=mock_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        confirmed=False,
-    )
-    ctx = MagicMock(spec=RunContext)
-    ctx.deps = deps
-
-    result = await confirm_request(ctx, mediaId=123, mediaType="movie")
-
-    assert "Confirmed" in result
-    assert "123" in result
-    assert "MOVIE" in result
-    assert deps.confirmed is True
-
-
-@pytest.mark.asyncio
-async def test_confirm_request_logs_info(
-    mock_config: AppConfig, test_db: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """confirm_request logs at INFO level with mediaId and mediaType."""
-    import logging
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-    profile = make_test_profile(user_id=63)
-    await profile_manager.save(profile)
-
-    deps = AgentDeps(
-        config=mock_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        confirmed=False,
-    )
-    ctx = MagicMock(spec=RunContext)
-    ctx.deps = deps
-
-    with caplog.at_level(logging.INFO, logger="home_agent.tools.profile_tools"):
-        await confirm_request(ctx, mediaId=456, mediaType="tv")
-
-    assert "confirm_request called" in caplog.text
+    assert "confirm_request" not in tool_names
 
 
 # ---------------------------------------------------------------------------
@@ -474,43 +412,3 @@ async def test_set_confirmation_mode_via_agent_run(
     profile_manager.save.assert_called()  # type: ignore[attr-defined]
 
 
-@pytest.mark.asyncio
-async def test_confirm_request_via_agent_run(
-    mock_config: AppConfig, test_db: Path
-) -> None:
-    """confirm_request tool sets confirmed=True on a real GuardedToolset via agent.run()."""
-    from unittest.mock import AsyncMock as _AsyncMock
-
-    from home_agent.mcp.guarded_toolset import GuardedToolset
-
-    # Build a real GuardedToolset wrapping a mocked inner toolset
-    inner = MagicMock()
-    inner.id = "test-server"
-    inner.__aenter__ = _AsyncMock(return_value=inner)
-    inner.__aexit__ = _AsyncMock(return_value=None)
-    inner.get_tools = _AsyncMock(return_value={})
-    inner.call_tool = _AsyncMock(return_value="result")
-
-    guarded = GuardedToolset(inner)  # Real instance — AbstractToolset contract enforced
-
-    profile_manager = ProfileManager(test_db)
-    history_manager = HistoryManager(test_db)
-    profile = make_test_profile(user_id=75)
-    await profile_manager.save(profile)
-
-    deps = AgentDeps(
-        config=mock_config,
-        profile_manager=profile_manager,
-        history_manager=history_manager,
-        user_profile=profile,
-        guarded_toolsets=[guarded],
-    )
-
-    agent_instance = create_agent(toolsets=[guarded])
-    m = TestModel(call_tools=["confirm_request"])
-    with agent_instance.override(model=m):
-        async with agent_instance:
-            await agent_instance.run("yes, confirm the request", deps=deps)
-
-    # confirm_request now sets deps.confirmed = True (stateless GuardedToolset)
-    assert deps.confirmed is True

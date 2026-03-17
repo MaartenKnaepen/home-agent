@@ -7,6 +7,7 @@ Business logic lives in agent.py. This module is Telegram wiring only.
 from __future__ import annotations
 
 import logging
+import socket
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -22,6 +23,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from home_agent.agent import AgentDeps
 from home_agent.config import AppConfig
@@ -65,9 +67,9 @@ async def _invoke_agent(
             confirmations.
     """
     assert update.effective_user is not None
-    assert update.message is not None
 
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id if update.effective_chat else None
 
     # Load user profile, seeding language for new users from Telegram locale
     language_code = update.effective_user.language_code
@@ -98,11 +100,18 @@ async def _invoke_agent(
         user_profile=user_profile,
         guarded_toolsets=guarded_toolsets,
         telegram_bot=context.bot,
-        telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
+        telegram_chat_id=chat_id,
         confirmed=confirmed,
         called_tools=set(),
         role=user_profile.role,
     )
+
+    async def _send_reply(text_to_send: str, **kwargs: Any) -> None:
+        """Send a reply via message.reply_text or bot.send_message as appropriate."""
+        if update.message is not None:
+            await update.message.reply_text(text_to_send, **kwargs)
+        elif chat_id is not None:
+            await context.bot.send_message(chat_id=chat_id, text=text_to_send, **kwargs)
 
     try:
         result = await agent.run(text, deps=deps, message_history=message_history)
@@ -111,20 +120,20 @@ async def _invoke_agent(
     except ModelHTTPError as exc:
         if exc.status_code == 429:
             logger.warning("Rate limit exhausted for user %d after retries", user_id)
-            await update.message.reply_text(
+            await _send_reply(
                 "⏳ The AI service is temporarily busy. Please try again in a moment.",
                 parse_mode=ParseMode.HTML,
             )
         else:
             logger.error("Model HTTP error for user %d: %s", user_id, exc, exc_info=True)
-            await update.message.reply_text(
+            await _send_reply(
                 "Sorry, something went wrong processing your request.",
                 parse_mode=ParseMode.HTML,
             )
         return
     except Exception as exc:
         logger.error("Agent.run() failed for user %d: %s", user_id, exc, exc_info=True)
-        await update.message.reply_text(
+        await _send_reply(
             "Sorry, something went wrong processing your request.",
             parse_mode=ParseMode.HTML,
         )
@@ -132,7 +141,7 @@ async def _invoke_agent(
 
     if not reply:
         logger.warning("Agent returned empty output for user %d", user_id)
-        await update.message.reply_text(
+        await _send_reply(
             "I completed the action but had no message to send back.",
             parse_mode=ParseMode.HTML,
         )
@@ -144,7 +153,7 @@ async def _invoke_agent(
 
     html_reply = md_to_telegram_html(reply)
     for chunk in _split_message(html_reply):
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await _send_reply(chunk, parse_mode=ParseMode.HTML)
     logger.debug("Sent agent reply to user %d", user_id)
 
 
@@ -256,6 +265,9 @@ def make_message_handler(
             await update.effective_chat.send_action(action=ChatAction.TYPING)
 
         text = update.message.text or ""
+        # Shared invocation path for text messages — handles profile loading, history,
+        # agent execution, error handling, and reply formatting. Also used by voice and
+        # callback handlers for consistency.
         await _invoke_agent(
             text, update, context,
             config, profile_manager, history_manager, agent,
@@ -357,7 +369,8 @@ def make_voice_handler(
                 )
                 return
 
-            # Delegate to the shared module-level agent invocation logic
+            # Reuse the shared invocation path after transcription. Ensures voice messages
+            # flow through the same agent pipeline as text messages.
             await _invoke_agent(
                 transcribed_text, update, context,
                 config, profile_manager, history_manager, agent,
@@ -478,64 +491,16 @@ def make_callback_handler(
                 parse_mode=ParseMode.HTML,
             )
 
-            # Re-run agent with a synthetic "yes confirmed" message so it calls
-            # request_media now that the confirmation gate will be unblocked.
-            language_code = update.effective_user.language_code
-            user_profile = await profile_manager.get(user_id, language_code=language_code)
-            raw_history = await history_manager.get_history(user_id=user_id)
-            message_history = convert_history_to_messages(raw_history)
-
-            # Consume the pending confirmation immediately for this re-run
-            confirmed = False
-            if user_id in _pending_confirmations:
-                _pending_confirmations.pop(user_id)
-                confirmed = True
-
-            deps = AgentDeps(
-                config=config,
-                profile_manager=profile_manager,
-                history_manager=history_manager,
-                user_profile=user_profile,
-                guarded_toolsets=guarded_toolsets,
-                telegram_bot=context.bot,
-                telegram_chat_id=update.effective_chat.id if update.effective_chat else None,
-                confirmed=confirmed,
-                called_tools=set(),
-                role=user_profile.role,
+            # Reuse the shared invocation path — handles profile loading, history,
+            # confirmation consumption (via pending_confirmations), agent execution,
+            # error handling, and reply formatting. The pending confirmation was stored
+            # above and will be consumed by _invoke_agent() at the start of its run.
+            await _invoke_agent(
+                "confirmed, please proceed with the request",
+                update, context,
+                config, profile_manager, history_manager, agent,
+                guarded_toolsets, _pending_confirmations,
             )
-
-            try:
-                result = await agent.run(
-                    "confirmed, please proceed with the request",
-                    deps=deps,
-                    message_history=message_history,
-                )
-                reply = result.output
-                if reply:
-                    await history_manager.save_message(
-                        user_id=user_id, role="assistant", content=reply
-                    )
-                    html_reply = md_to_telegram_html(reply)
-                    if update.effective_chat:
-                        for chunk in _split_message(html_reply):
-                            await context.bot.send_message(
-                                chat_id=update.effective_chat.id,
-                                text=chunk,
-                                parse_mode=ParseMode.HTML,
-                            )
-            except Exception as exc:
-                logger.error(
-                    "Agent re-run after confirm failed for user %d: %s",
-                    user_id,
-                    exc,
-                    exc_info=True,
-                )
-                if update.effective_chat:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text="Sorry, something went wrong processing your request.",
-                        parse_mode=ParseMode.HTML,
-                    )
 
         elif data == "cancel":
             # Remove any pending confirmation for this user
@@ -573,7 +538,24 @@ def create_application(
     pending_confirmations: dict[int, tuple[int, str]] = {}
 
     token = config.telegram_bot_token.get_secret_value()
-    app: Application = Application.builder().token(token).build()
+
+    # Configure TCP keepalive on the Telegram HTTP connection pool.
+    # Without this, idle connections are silently closed by Telegram's servers
+    # (or intermediate NAT devices) after a few seconds. When the agent takes
+    # several seconds to run, the next reply_text() call finds the pooled
+    # connection stale and times out with ConnectTimeout.
+    # Keepalive probes keep the connection alive and detect closure immediately
+    # so httpx can open a fresh connection without a full timeout penalty.
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        socket_options=[
+            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),    # Enable TCP keepalive
+            (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10),  # Start probing after 10s idle
+            (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5),  # Probe every 5s
+            (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),    # Give up after 3 failed probes
+        ],
+    )
+    app: Application = Application.builder().token(token).request(request).build()
     handler = make_message_handler(
         config,
         profile_manager,

@@ -14,11 +14,9 @@ from telegram import Bot
 
 from home_agent.config import AppConfig
 from home_agent.history import HistoryManager, sliding_window_processor
-from home_agent.mcp.registry import MCPRegistry
 from home_agent.profile import ProfileManager, UserProfile
 from home_agent.prompts import SYSTEM_PROMPT
 from home_agent.tools.profile_tools import (
-    confirm_request,
     set_confirmation_mode,
     set_movie_quality,
     set_reply_language,
@@ -30,6 +28,21 @@ if TYPE_CHECKING:
     from home_agent.mcp.guarded_toolset import GuardedToolset
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RetryConfig:
+    """Configuration for exponential backoff retry behavior.
+
+    Attributes:
+        max_retries: Maximum number of retries on HTTP 429 rate limit errors.
+        base_delay: Base delay in seconds for exponential backoff. Doubles each retry.
+        max_delay: Maximum delay in seconds for exponential backoff. Caps the doubling.
+    """
+
+    max_retries: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 30.0
 
 
 @dataclass
@@ -75,9 +88,7 @@ class AgentDeps:
 def create_agent(
     toolsets: list[Any] | None = None,
     model: str = "openrouter:qwen/qwq-32b:free",
-    max_retries: int = 3,
-    base_delay: float = 1.0,
-    max_delay: float = 30.0,
+    retry_config: RetryConfig | None = None,
 ) -> Agent[AgentDeps, str]:
     """Create a PydanticAI agent with optional MCP toolsets.
 
@@ -86,21 +97,23 @@ def create_agent(
             If None, the agent runs without MCP tools (useful for tests).
         model: PydanticAI model string to use. Defaults to qwen/qwq-32b:free.
             Override via the LLM_MODEL environment variable in production.
-        max_retries: Maximum number of retries on HTTP 429 rate limit errors.
-            Defaults to 3.
-        base_delay: Base delay in seconds for exponential backoff. Doubles each retry.
-            Defaults to 1.0.
-        max_delay: Maximum delay in seconds for exponential backoff. Caps the doubling.
-            Defaults to 30.0.
+        retry_config: RetryConfig for exponential backoff on rate limits.
+            If None, defaults are used (3 retries, 1.0s base delay, 30.0s max).
 
     Returns:
         Configured Agent instance with system prompt and tools registered.
     """
     from home_agent.models.retry_model import RetryingModel
 
+    _retry_config = retry_config or RetryConfig()
     # Pass the model string directly so the provider (and its API-key check) is
     # resolved lazily on the first request, honouring defer_model_check behaviour.
-    retrying_model = RetryingModel(model, max_retries=max_retries, base_delay=base_delay, max_delay=max_delay)
+    retrying_model = RetryingModel(
+        model,
+        max_retries=_retry_config.max_retries,
+        base_delay=_retry_config.base_delay,
+        max_delay=_retry_config.max_delay,
+    )
     agent_instance: Agent[AgentDeps, str] = Agent(
         retrying_model,
         deps_type=AgentDeps,
@@ -186,7 +199,6 @@ def create_agent(
     agent_instance.tool(set_series_quality)
     agent_instance.tool(set_reply_language)
     agent_instance.tool(set_confirmation_mode)
-    agent_instance.tool(confirm_request)
 
     # Register Telegram rich UX tools
     agent_instance.tool(send_confirmation_keyboard)
@@ -195,13 +207,3 @@ def create_agent(
     return agent_instance
 
 
-def get_agent_toolsets(registry: MCPRegistry) -> list[Any]:
-    """Get MCP toolsets from the registry for agent construction.
-
-    Args:
-        registry: MCP registry with registered server configurations.
-
-    Returns:
-        List of FastMCPToolset instances for all enabled servers.
-    """
-    return registry.get_toolsets()

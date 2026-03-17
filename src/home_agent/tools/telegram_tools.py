@@ -116,7 +116,7 @@ async def send_poster_image(
         Confirmation that the image was sent, or a fallback message.
     """
     if not posterPath:
-        logger.debug("send_poster_image called with no posterPath — skipping")
+        logger.info("send_poster_image called with no posterPath — skipping")
         return "No poster image available."
 
     url = f"{TMDB_IMAGE_BASE}{posterPath}"

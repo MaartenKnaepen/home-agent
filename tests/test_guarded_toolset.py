@@ -204,7 +204,7 @@ async def test_request_media_blocked_when_confirmation_required_and_not_confirme
     result = await _call(guarded, "request_media", {"mediaType": "movie", "mediaId": 123, "is4k": True}, deps_always_confirm)
 
     assert "confirmation required" in result.lower()
-    assert "confirm_request" in result
+    assert "send_confirmation_keyboard" in result
     mock_inner_toolset.call_tool.assert_not_called()
 
 
@@ -533,7 +533,7 @@ async def test_series_no_quality_seasons_still_blocked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirm_request_then_request_media_same_turn() -> None:
+async def test_keyboard_confirm_then_request_media_same_turn() -> None:
     """Simulate full confirm flow: guard blocks → confirmed=True in deps → request_media succeeds."""
     mock_inner = AsyncMock()
     mock_inner.call_tool = AsyncMock(return_value="request accepted")
@@ -565,12 +565,12 @@ async def test_confirm_request_then_request_media_same_turn() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Edge case: confirm_request for wrong media ID
+# Edge case: confirmed=True unblocks any request_media regardless of mediaId
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_confirm_request_media_id_mismatch() -> None:
+async def test_confirmed_flag_unblocks_any_media_id() -> None:
     """confirmed=True in deps unblocks any request_media regardless of mediaId.
 
     Design note: the confirmed flag is intentionally not mediaId-scoped.
