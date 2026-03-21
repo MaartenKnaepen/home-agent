@@ -283,6 +283,7 @@ def make_voice_handler(
     history_manager: HistoryManager,
     agent: Agent[AgentDeps, str],
     guarded_toolsets: list[GuardedToolset] | None = None,
+    pending_confirmations: dict[int, tuple[int, str]] | None = None,
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, None]]:
     """Create a Telegram voice message handler.
 
@@ -295,13 +296,14 @@ def make_voice_handler(
         history_manager: Manages conversation history persistence.
         agent: The PydanticAI agent instance to use for inference.
         guarded_toolsets: Optional list of GuardedToolset instances.
+        pending_confirmations: Shared dict keyed by user_id for storing inline-keyboard
+            confirmations between the callback handler and the voice handler.
 
     Returns:
         An async handler coroutine compatible with python-telegram-bot.
     """
     _guarded_toolsets: list[GuardedToolset] = guarded_toolsets or []
-    # Voice handler has no shared pending_confirmations — always starts fresh.
-    _pending_confirmations: dict[int, tuple[int, str]] = {}
+    _pending_confirmations: dict[int, tuple[int, str]] = pending_confirmations if pending_confirmations is not None else {}
 
     async def handle_voice(
         update: Update, context: ContextTypes.DEFAULT_TYPE

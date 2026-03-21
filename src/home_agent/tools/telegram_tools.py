@@ -138,8 +138,8 @@ async def send_poster_image(
         )
         logger.info("Sent poster image", extra={"url": url})
         return "Poster image sent."
-    except Exception as e:
+    except Exception:
         logger.warning(
-            "send_poster_image failed", extra={"url": url, "error": str(e)}
+            "send_poster_image failed", extra={"url": url}, exc_info=True
         )
         return "Could not send poster image (unavailable)."
